@@ -4,7 +4,7 @@ A native Linux desktop app for [Tailscale](https://tailscale.com) and its Mullva
 
 Free and open source. Written in Rust with [Slint](https://slint.dev). It wraps the `tailscale` CLI you already have.
 
-> **Early release (0.1).** Status, devices and serving have been read from a real daemon, and switching exit nodes and the operator grant have worked on one. The other controls haven't been tried on a real daemon yet. See [Known limitations](#known-limitations). `tailgate --read-only` is a safe way to look around first.
+> **Early release (0.1).** Status, devices and serving have been read from a real daemon, and switching exit nodes, the Mullvad on/off switch and the operator grant have worked on one. The other controls haven't been tried on a real daemon yet. See [Known limitations](#known-limitations). `tailgate --read-only` is a safe way to look around first.
 
 ![Tailgate showing the exit node list](docs/screenshots/exit-nodes.png)
 
@@ -101,8 +101,8 @@ Served ports show as "Port 8443". To give them names, create `~/.config/tailgate
 
 As of 0.1.0, updated after release:
 
-- **Tried on a real Tailscale daemon so far:** switching exit nodes and the operator grant, confirmed afterward with `tailscale` and a Mullvad IP check.
-- **Not yet tried on a real daemon:** Mullvad off and on, LAN access, Tailscale up and down, and running a single change with "Just this once".
+- **Tried on a real Tailscale daemon so far:** switching exit nodes, the Mullvad on/off switch (on returned to the last location) and the operator grant, confirmed afterward with `tailscale` and a Mullvad IP check.
+- **Not yet tried on a real daemon:** LAN access, Tailscale up and down, and running a single change with "Just this once".
 - What has been tested:
   - The automated test suite.
   - A fake `tailscale` CLI driving the real window, with every control clicked and the exact arguments recorded.
