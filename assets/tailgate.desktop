@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Tailgate
+GenericName=Tailscale Manager
+Comment=Manage Tailscale and its Mullvad exit nodes
+Exec=@BIN@
+Icon=tailgate
+Terminal=false
+Categories=Network;
+Keywords=tailscale;mullvad;vpn;exit node;
+StartupWMClass=tailgate

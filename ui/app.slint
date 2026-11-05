@@ -1,0 +1,1130 @@
+import { AboutSlint, ListView, ScrollView, Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Card, Label, Btn, Toggle, Pill, IconButton, SearchBox, TabButton, Scrim, ChoiceCard } from "widgets.slint";
+
+export { Theme }
+
+export struct NodeRow {
+    header: bool,
+    title: string,
+    subtitle: string,
+    code: string,
+    id: string,
+    current: bool,
+    favorite: bool,
+    selectable: bool,
+}
+
+export struct DeviceRow {
+    name: string,
+    detail: string,
+    ip: string,
+    online: bool,
+    this-machine: bool,
+    offers-exit: bool,
+}
+
+export struct ServeRow {
+    name: string,
+    address: string,
+    target: string,
+    scope: string,
+    public: bool,
+}
+
+export global App {
+    // Status
+    in property <int> tone: 3;
+    in property <string> pill: "Checking";
+    in property <string> title: "Tailgate";
+    in property <string> detail;
+    in property <string> machine;
+    in property <string> tailnet-ip;
+    in property <string> tailnet;
+    in property <string> health;
+    in property <string> banner;
+    in property <string> control-note;
+
+    // Controls
+    in property <bool> exit-active;
+    in property <bool> exit-enabled: false;
+    in property <string> exit-label: "Route through Mullvad";
+    in property <string> exit-hint;
+    in property <bool> lan-access;
+    in property <bool> lan-enabled: false;
+    in property <bool> up;
+    in property <string> up-label: "Bring Tailscale up";
+    in property <string> up-note: "Unknown";
+    in property <bool> up-enabled: false;
+    in property <bool> busy;
+    in property <string> busy-text;
+
+    // Check my IP
+    in property <int> ip-state: 0; // 0 idle, 1 checking, 2 result, 3 failed
+    in property <string> ip-address;
+    in property <string> ip-place;
+    in property <string> ip-mullvad;
+    in property <bool> ip-is-mullvad;
+    in property <string> ip-error;
+
+    // Lists
+    in property <[NodeRow]> nodes;
+    in property <string> node-count;
+    in property <string> node-empty;
+    in property <bool> nodes-enabled;
+    in-out property <string> query;
+    in property <bool> all-servers;
+    in property <[DeviceRow]> devices;
+    in property <[ServeRow]> serve-rows;
+    in property <string> serve-text;
+
+    // Notice bar: 0 hidden, 1 info, 2 error
+    in property <int> notice-kind: 0;
+    in property <string> notice;
+
+    // Confirm dialog
+    in property <bool> confirm-open;
+    in property <string> confirm-title;
+    in property <string> confirm-lead;
+    in property <[string]> confirm-lines;
+    in property <string> confirm-button;
+    in property <bool> confirm-danger;
+
+    // Permission dialog
+    in property <bool> permission-open;
+    in property <string> permission-lead;
+    in property <string> operator-detail;
+    in property <string> once-detail;
+
+    in property <string> version;
+    in-out property <bool> about-open: false;
+
+    in-out property <int> tab: 0;
+    // Mirrors the window width. Binding to it directly would be a layout loop,
+    // since the layout's minimum width depends on which layout is showing.
+    in-out property <bool> narrow: false;
+    in-out property <length> window-width: 1000px;
+
+    callback switch-node(string);
+    callback toggle-favorite(string);
+    callback query-edited(string);
+    callback set-all-servers(bool);
+    callback toggle-exit();
+    callback toggle-lan();
+    callback toggle-up();
+    callback check-ip();
+    callback open-admin();
+    callback open-source();
+    callback dismiss-notice();
+    callback confirm-accept();
+    callback confirm-cancel();
+    callback permission-operator();
+    callback permission-once();
+    callback permission-cancel();
+    callback toggle-theme();
+    callback tab-changed(int);
+}
+
+component SectionTitle inherits Text {
+    color: Theme.soft;
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    vertical-alignment: center;
+}
+
+component InfoRow {
+    in property <string> name;
+    in property <string> value;
+    HorizontalLayout {
+        spacing: 12px;
+        Text {
+            text: root.name;
+            color: Theme.soft;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.value;
+            color: Theme.ink;
+            font-size: 13px;
+            font-weight: 500;
+            horizontal-alignment: right;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.line;
+}
+
+component SwitchRow {
+    in property <string> name;
+    in property <string> hint;
+    in property <bool> on;
+    in property <bool> enabled: true;
+    callback toggled;
+
+    HorizontalLayout {
+        spacing: 14px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.name;
+                color: Theme.ink;
+                font-size: 14px;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+            if root.hint != "": Text {
+                text: root.hint;
+                color: Theme.soft;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Toggle {
+                name: root.name;
+                on: root.on;
+                enabled: root.enabled;
+                toggled => { root.toggled(); }
+            }
+        }
+    }
+}
+
+component StatusCard inherits Card {
+    VerticalLayout {
+        padding: 18px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            alignment: start;
+            Pill { text: App.pill; tone: App.tone; }
+        }
+
+        VerticalLayout {
+            spacing: 2px;
+            Text {
+                text: App.title;
+                font-family: Theme.display-font;
+                font-size: 26px;
+                font-weight: 600;
+                color: Theme.ink;
+                wrap: word-wrap;
+            }
+            Text {
+                text: App.detail;
+                font-size: 13px;
+                color: Theme.soft;
+                wrap: word-wrap;
+            }
+        }
+
+        SwitchRow {
+            name: App.exit-label;
+            hint: App.exit-hint;
+            on: App.exit-active;
+            enabled: App.exit-enabled && !App.busy;
+            toggled => { App.toggle-exit(); }
+        }
+
+        Divider { }
+
+        InfoRow { name: "This machine"; value: App.machine; }
+        InfoRow { name: "Tailnet IP"; value: App.tailnet-ip; }
+        InfoRow { name: "Tailnet"; value: App.tailnet; }
+
+        if App.health != "": Text {
+            text: App.health;
+            color: Theme.warn;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+    }
+}
+
+component ControlsCard inherits Card {
+    VerticalLayout {
+        padding: 18px;
+        spacing: 14px;
+
+        SwitchRow {
+            name: "Allow LAN access";
+            hint: "Reach the router and printers at home while on an exit node.";
+            on: App.lan-access;
+            enabled: App.lan-enabled && !App.busy;
+            toggled => { App.toggle-lan(); }
+        }
+
+        Divider { }
+
+        HorizontalLayout {
+            spacing: 10px;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                Text {
+                    text: "Tailscale";
+                    color: Theme.ink;
+                    font-size: 14px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: App.up-note;
+                    color: Theme.soft;
+                    font-size: 12px;
+                }
+            }
+            Btn {
+                text: App.up-label;
+                kind: App.up ? 0 : 1;
+                enabled: App.up-enabled && !App.busy;
+                clicked => { App.toggle-up(); }
+            }
+        }
+
+        if App.control-note != "": Text {
+            text: App.control-note;
+            color: Theme.soft;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+    }
+}
+
+component IpCard inherits Card {
+    VerticalLayout {
+        padding: 18px;
+        spacing: 10px;
+
+        HorizontalLayout {
+            spacing: 10px;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                Text {
+                    text: "What sites see";
+                    color: Theme.ink;
+                    font-size: 14px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: "Asks am.i.mullvad.net, only when you click.";
+                    color: Theme.soft;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+            Btn {
+                text: App.ip-state == 1 ? "Checking…" : "Check my IP";
+                enabled: App.ip-state != 1;
+                clicked => { App.check-ip(); }
+            }
+        }
+
+        if App.ip-state == 2: VerticalLayout {
+            spacing: 2px;
+            Text {
+                text: App.ip-address + " · " + App.ip-place;
+                font-size: 13px;
+                font-weight: 600;
+                color: Theme.ink;
+                wrap: word-wrap;
+            }
+            Text {
+                text: App.ip-mullvad;
+                font-size: 12.5px;
+                font-weight: 600;
+                color: App.ip-is-mullvad ? Theme.good : Theme.warn;
+                wrap: word-wrap;
+            }
+        }
+
+        if App.ip-state == 3: Text {
+            text: App.ip-error;
+            color: Theme.bad;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+    }
+}
+
+component AdminLink {
+    min-height: 34px;
+    accessible-role: button;
+    accessible-label: "Open the Tailscale admin console";
+    accessible-action-default => { App.open-admin(); }
+    Text {
+        text: "Open the Tailscale admin console ↗";
+        color: touch.has-hover ? Theme.ink : Theme.accent;
+        font-size: 13px;
+        font-weight: 600;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { App.open-admin(); }
+    }
+}
+
+component StatusColumn {
+    in property <bool> show-status-card: true;
+    ScrollView {
+        content-height: stack.preferred-height;
+        stack := VerticalLayout {
+            spacing: 12px;
+            padding-right: 10px;
+            if root.show-status-card: StatusCard { }
+            ControlsCard { }
+            IpCard { }
+            AdminLink { }
+        }
+    }
+}
+
+component CountryChip {
+    in property <string> code;
+    width: 34px;
+    height: 34px;
+    Rectangle {
+        border-radius: 8px;
+        background: Theme.accent-tint;
+        Text {
+            text: root.code == "" ? "•" : root.code;
+            color: Theme.dark ? Theme.ink : Theme.accent.darker(10%);
+            font-size: 12px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component NodeItem {
+    in property <NodeRow> data;
+    height: data.header ? 34px : 58px;
+
+    if data.header: Text {
+        x: 6px;
+        y: 10px;
+        width: parent.width - 12px;
+        height: 22px;
+        text: data.title;
+        color: Theme.soft;
+        font-size: 12px;
+        font-weight: 700;
+        vertical-alignment: center;
+    }
+
+    if !data.header: Rectangle {
+        x: 0;
+        y: 2px;
+        height: parent.height - 4px;
+        width: parent.width - 12px;
+        border-radius: 10px;
+        border-width: data.current ? 1px : 0px;
+        border-color: Theme.good;
+        background: data.current ? Theme.good-tint : (touch.has-hover && data.selectable && App.nodes-enabled ? Theme.hover : transparent);
+        animate background { duration: 90ms; }
+
+        touch := TouchArea {
+            enabled: data.selectable && !data.current && App.nodes-enabled && !App.busy;
+            mouse-cursor: self.enabled ? pointer : default;
+            clicked => { App.switch-node(data.id); }
+        }
+
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 6px;
+            spacing: 12px;
+            opacity: data.selectable ? 1 : 0.55;
+
+            VerticalLayout {
+                alignment: center;
+                CountryChip { code: data.code; }
+            }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 1px;
+                Text {
+                    text: data.title;
+                    color: Theme.ink;
+                    font-size: 14px;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+                Text {
+                    text: data.subtitle;
+                    color: Theme.soft;
+                    font-size: 12px;
+                    overflow: elide;
+                }
+            }
+            if data.current: VerticalLayout {
+                alignment: center;
+                Text {
+                    text: "Connected";
+                    color: Theme.dark ? Theme.ink : Theme.good.darker(15%);
+                    font-size: 12px;
+                    font-weight: 700;
+                }
+            }
+            if !data.current && touch.has-hover && touch.enabled: VerticalLayout {
+                alignment: center;
+                Text {
+                    text: "Connect";
+                    color: Theme.accent;
+                    font-size: 12px;
+                    font-weight: 700;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                IconButton {
+                    name: data.favorite ? "Remove favorite" : "Add favorite";
+                    tint: data.favorite ? Theme.star : Theme.soft;
+                    filled: data.favorite;
+                    commands: "M12 3.5 L14.6 9 L20.6 9.8 L16.2 14 L17.3 20 L12 17.1 L6.7 20 L7.8 14 L3.4 9.8 L9.4 9 Z";
+                    clicked => { App.toggle-favorite(data.id); }
+                }
+            }
+        }
+    }
+}
+
+component NodesPane {
+    VerticalLayout {
+        spacing: 10px;
+        SearchBox {
+            text <=> App.query;
+            placeholder: "Search city, country or hostname";
+            edited(value) => { App.query-edited(value); }
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            Label {
+                text: App.node-count;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            Label { text: "Every server"; }
+            Toggle {
+                name: "Show every server";
+                on: App.all-servers;
+                toggled => { App.set-all-servers(!App.all-servers); }
+            }
+        }
+        if App.node-empty != "": Text {
+            vertical-stretch: 1;
+            text: App.node-empty;
+            color: Theme.soft;
+            font-size: 14px;
+            wrap: word-wrap;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        if App.node-empty == "": ListView {
+            vertical-stretch: 1;
+            for row in App.nodes: NodeItem { data: row; }
+        }
+    }
+}
+
+component DevicesPane {
+    if App.devices.length == 0: Text {
+        text: "No devices until Tailscale answers.";
+        color: Theme.soft;
+        font-size: 14px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ListView {
+        for device in App.devices: Rectangle {
+            height: 62px;
+            HorizontalLayout {
+                padding-right: 14px;
+                padding-left: 6px;
+                spacing: 12px;
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background: device.online ? Theme.good : Theme.off;
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 1px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Text {
+                            text: device.name;
+                            color: Theme.ink;
+                            font-size: 14px;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+                        if device.this-machine: Text {
+                            text: "this machine";
+                            color: Theme.accent;
+                            font-size: 12px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                        if device.offers-exit: Text {
+                            text: "exit node";
+                            color: Theme.good;
+                            font-size: 12px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        text: device.detail;
+                        color: Theme.soft;
+                        font-size: 12px;
+                        overflow: elide;
+                    }
+                }
+                Text {
+                    text: device.ip;
+                    color: Theme.soft;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+            }
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Theme.line;
+            }
+        }
+    }
+}
+
+component ServePane {
+    ScrollView {
+        content-height: list.preferred-height;
+        list := VerticalLayout {
+            spacing: 10px;
+            padding-right: 14px;
+            Text {
+                text: "Read-only. These are served by tailscale serve on this machine.";
+                color: Theme.soft;
+                font-size: 12.5px;
+                wrap: word-wrap;
+            }
+            for row in App.serve-rows: Rectangle {
+                background: Theme.well;
+                border-radius: 10px;
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 3px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: row.name;
+                            color: Theme.ink;
+                            font-size: 14px;
+                            font-weight: 600;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: row.scope;
+                            color: row.public ? Theme.bad : Theme.soft;
+                            font-size: 12px;
+                            font-weight: row.public ? 700 : 400;
+                        }
+                    }
+                    Text { text: row.address; color: Theme.soft; font-size: 12.5px; wrap: word-wrap; }
+                    Text { text: "→ " + row.target; color: Theme.soft; font-size: 12.5px; wrap: word-wrap; }
+                }
+            }
+            SectionTitle { text: "CLI OUTPUT"; }
+            Rectangle {
+                background: Theme.well;
+                border-radius: 10px;
+                VerticalLayout {
+                    padding: 12px;
+                    Text {
+                        text: App.serve-text;
+                        font-family: Theme.mono-font;
+                        font-size: 11.5px;
+                        color: Theme.ink;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}
+
+component NoticeBar {
+    in property <int> kind;
+    in property <string> text;
+    in property <bool> dismissable: true;
+    callback dismiss;
+    Rectangle {
+        border-radius: 10px;
+        background: root.kind == 2 ? Theme.bad-tint : Theme.accent-tint;
+        HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 4px;
+            padding-top: 6px;
+            padding-bottom: 6px;
+            spacing: 8px;
+            Text {
+                text: root.text;
+                color: Theme.ink;
+                font-size: 13px;
+                wrap: word-wrap;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            if root.dismissable: VerticalLayout {
+                alignment: center;
+                IconButton {
+                    name: "Dismiss";
+                    scale: 0.42;
+                    commands: "M5 5 L19 19 M19 5 L5 19";
+                    clicked => { root.dismiss(); }
+                }
+            }
+        }
+    }
+}
+
+component ConfirmDialog {
+    property <length> card-width: min(460px, App.window-width - 36px);
+    FocusScope {
+        width: 100%;
+        height: 100%;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                App.confirm-cancel();
+                return accept;
+            }
+            reject
+        }
+        Scrim { width: 100%; height: 100%; VerticalLayout {
+            width: 100%;
+            height: 100%;
+            alignment: center;
+            HorizontalLayout {
+                alignment: center;
+                padding: 18px;
+                Card {
+                    width: root.card-width;
+                    VerticalLayout {
+                        padding: 22px;
+                        spacing: 12px;
+                        Text {
+                            text: App.confirm-title;
+                            font-family: Theme.display-font;
+                            font-size: 20px;
+                            font-weight: 600;
+                            color: Theme.ink;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: App.confirm-lead;
+                            font-size: 13.5px;
+                            color: Theme.soft;
+                            wrap: word-wrap;
+                        }
+                        for line in App.confirm-lines: HorizontalLayout {
+                            spacing: 9px;
+                            VerticalLayout {
+                                padding-top: 6px;
+                                alignment: start;
+                                Rectangle {
+                                    width: 6px;
+                                    height: 6px;
+                                    border-radius: 3px;
+                                    background: Theme.accent;
+                                }
+                            }
+                            Text {
+                                // A set width, because a wrapped Text nested in a row
+                                // otherwise reports the height of a single line.
+                                width: root.card-width - 44px - 15px;
+                                text: line;
+                                font-size: 13.5px;
+                                color: Theme.ink;
+                                wrap: word-wrap;
+                            }
+                        }
+                        HorizontalLayout {
+                            padding-top: 6px;
+                            spacing: 10px;
+                            alignment: end;
+                            cancel := Btn {
+                                text: "Cancel";
+                                clicked => { App.confirm-cancel(); }
+                            }
+                            Btn {
+                                text: App.confirm-button;
+                                kind: App.confirm-danger ? 2 : 1;
+                                clicked => { App.confirm-accept(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } }
+    // Starts on Cancel, so Enter alone can't confirm something disruptive.
+    init => { cancel.focus(); }
+}
+
+component PermissionDialog {
+    FocusScope {
+        width: 100%;
+        height: 100%;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                App.permission-cancel();
+                return accept;
+            }
+            reject
+        }
+        Scrim { width: 100%; height: 100%; VerticalLayout {
+            width: 100%;
+            height: 100%;
+            alignment: center;
+            HorizontalLayout {
+                alignment: center;
+                padding: 18px;
+                Card {
+                    width: min(480px, App.window-width - 36px);
+                    VerticalLayout {
+                        padding: 22px;
+                        spacing: 12px;
+                        Text {
+                            text: "Tailscale said no";
+                            font-family: Theme.display-font;
+                            font-size: 20px;
+                            font-weight: 600;
+                            color: Theme.ink;
+                        }
+                        Text {
+                            text: App.permission-lead;
+                            font-size: 13.5px;
+                            color: Theme.soft;
+                            wrap: word-wrap;
+                        }
+                        ChoiceCard {
+                            emphasized: true;
+                            title: "Let Tailgate control Tailscale";
+                            detail: App.operator-detail;
+                            clicked => { App.permission-operator(); }
+                        }
+                        ChoiceCard {
+                            title: "Just this once";
+                            detail: App.once-detail;
+                            clicked => { App.permission-once(); }
+                        }
+                        HorizontalLayout {
+                            alignment: end;
+                            cancel := Btn {
+                                text: "Cancel";
+                                clicked => { App.permission-cancel(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } }
+    init => { cancel.focus(); }
+}
+
+component AboutDialog {
+    FocusScope {
+        width: 100%;
+        height: 100%;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                App.about-open = false;
+                return accept;
+            }
+            reject
+        }
+        Scrim { width: 100%; height: 100%; VerticalLayout {
+            width: 100%;
+            height: 100%;
+            alignment: center;
+            HorizontalLayout {
+                alignment: center;
+                padding: 18px;
+                Card {
+                    width: min(460px, App.window-width - 36px);
+                    VerticalLayout {
+                        padding: 22px;
+                        spacing: 12px;
+                        Text {
+                            text: "Tailgate " + App.version;
+                            font-family: Theme.display-font;
+                            font-size: 20px;
+                            font-weight: 600;
+                            color: Theme.ink;
+                        }
+                        Text {
+                            text: "A desktop app for Tailscale and its Mullvad exit nodes. Free and open source under MIT OR Apache-2.0, by Center Point Labs.";
+                            font-size: 13.5px;
+                            color: Theme.soft;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: "Not affiliated with or endorsed by Tailscale Inc. or Mullvad VPN AB. Tailscale and Mullvad are their trademarks.";
+                            font-size: 12.5px;
+                            color: Theme.soft;
+                            wrap: word-wrap;
+                        }
+                        AboutSlint { }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: end;
+                            Btn {
+                                text: "Source code ↗";
+                                clicked => { App.open-source(); }
+                            }
+                            close := Btn {
+                                text: "Close";
+                                kind: 1;
+                                clicked => { App.about-open = false; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } }
+    init => { close.focus(); }
+}
+
+component Brand {
+    HorizontalLayout {
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Image {
+                source: @image-url("../assets/tailgate-64.png");
+                width: 28px;
+                height: 28px;
+            }
+        }
+        Text {
+            text: "Tailgate";
+            font-family: Theme.display-font;
+            font-size: 20px;
+            font-weight: 600;
+            color: Theme.ink;
+            vertical-alignment: center;
+        }
+        Rectangle { horizontal-stretch: 1; }
+        VerticalLayout {
+            alignment: center;
+            IconButton {
+                name: "About Tailgate";
+                commands: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18 M12 11 V16.500 M12 7.500 V8";
+                clicked => { App.about-open = true; }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            IconButton {
+                name: Theme.dark ? "Use the light theme" : "Use the dark theme";
+                commands: Theme.dark
+                    ? "M12 7a5 5 0 1 0 0 10a5 5 0 1 0 0-10 M12 2 V4 M12 20 V22 M2 12 H4 M20 12 H22 M5 5 L6.5 6.5 M17.5 17.5 L19 19 M19 5 L17.5 6.5 M6.5 17.5 L5 19"
+                    : "M20 14.5A8.5 8.5 0 1 1 9.5 4A7 7 0 0 0 20 14.5Z";
+                clicked => { App.toggle-theme(); }
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Tailgate";
+    icon: @image-url("../assets/tailgate-256.png");
+    preferred-width: 1000px;
+    preferred-height: 780px;
+    min-width: 400px;
+    min-height: 500px;
+    background: Theme.bg;
+    default-font-size: 14px;
+
+    // Narrow windows gain a Status tab, so the indexes shift by one.
+    property <int> nodes-tab: App.narrow ? 1 : 0;
+    property <int> devices-tab: App.narrow ? 2 : 1;
+    property <int> serve-tab: App.narrow ? 3 : 2;
+
+    changed width => {
+        App.window-width = self.width;
+        if (App.narrow != (self.width < 780px)) {
+            App.narrow = !App.narrow;
+            // Keep the same pane showing across the breakpoint.
+            App.tab = App.narrow ? App.tab + 1 : max(App.tab - 1, 0);
+        }
+    }
+
+    // Scrollbars come from the style, so tell it which way the theme went.
+    property <bool> dark-theme: Theme.dark;
+    changed dark-theme => {
+        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+    }
+    init => {
+        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    VerticalLayout {
+        padding: App.narrow ? 12px : 18px;
+        spacing: 12px;
+
+        if App.banner != "": Rectangle {
+            background: Theme.warn-tint;
+            border-radius: 10px;
+            HorizontalLayout {
+                padding: 10px;
+                Text {
+                    text: App.banner;
+                    color: Theme.ink;
+                    font-size: 12.5px;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: 18px;
+
+            if !App.narrow: VerticalLayout {
+                width: 350px;
+                spacing: 12px;
+                Brand { }
+                StatusColumn { vertical-stretch: 1; }
+            }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 10px;
+
+                if App.narrow: Brand { }
+
+                if App.narrow: Card {
+                    HorizontalLayout {
+                        padding: 12px;
+                        spacing: 12px;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            spacing: 1px;
+                            Text {
+                                text: App.title;
+                                font-family: Theme.display-font;
+                                font-size: 18px;
+                                font-weight: 600;
+                                color: Theme.ink;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: App.pill;
+                                font-size: 12px;
+                                color: App.tone == 0 ? Theme.good : App.tone == 1 ? Theme.warn : App.tone == 2 ? Theme.off : Theme.bad;
+                                font-weight: 600;
+                                overflow: elide;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Toggle {
+                                name: App.exit-label;
+                                on: App.exit-active;
+                                enabled: App.exit-enabled && !App.busy;
+                                toggled => { App.toggle-exit(); }
+                            }
+                        }
+                    }
+                }
+
+                Card {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding-left: 16px;
+                        padding-right: 6px;
+                        padding-top: 4px;
+                        padding-bottom: 12px;
+                        spacing: 10px;
+
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 6px;
+                            if App.narrow: TabButton {
+                                text: "Status";
+                                active: App.tab == 0;
+                                clicked => { App.tab = 0; App.tab-changed(App.tab); }
+                            }
+                            TabButton {
+                                text: "Exit nodes";
+                                active: App.tab == nodes-tab;
+                                clicked => { App.tab = nodes-tab; App.tab-changed(App.tab); }
+                            }
+                            TabButton {
+                                text: "Devices";
+                                active: App.tab == devices-tab;
+                                clicked => { App.tab = devices-tab; App.tab-changed(App.tab); }
+                            }
+                            TabButton {
+                                text: "Serving";
+                                active: App.tab == serve-tab;
+                                clicked => { App.tab = serve-tab; App.tab-changed(App.tab); }
+                            }
+                        }
+
+                        if App.narrow && App.tab == 0: StatusColumn { vertical-stretch: 1; }
+                        if App.tab == nodes-tab: HorizontalLayout {
+                            vertical-stretch: 1;
+                            padding-right: 10px;
+                            NodesPane { }
+                        }
+                        if App.tab == devices-tab: DevicesPane { vertical-stretch: 1; }
+                        if App.tab == serve-tab: ServePane { vertical-stretch: 1; }
+                    }
+                }
+
+                if App.busy: NoticeBar {
+                    kind: 1;
+                    text: App.busy-text;
+                    dismissable: false;
+                }
+                if !App.busy && App.notice-kind != 0: NoticeBar {
+                    kind: App.notice-kind;
+                    text: App.notice;
+                    dismiss => { App.dismiss-notice(); }
+                }
+            }
+        }
+    }
+
+    if App.confirm-open: ConfirmDialog { x: 0; y: 0; width: 100%; height: 100%; }
+    if App.permission-open: PermissionDialog { x: 0; y: 0; width: 100%; height: 100%; }
+    if App.about-open: AboutDialog { x: 0; y: 0; width: 100%; height: 100%; }
+}
+

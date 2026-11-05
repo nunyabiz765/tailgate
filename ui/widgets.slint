@@ -1,0 +1,379 @@
+import { Theme } from "theme.slint";
+
+export component Card inherits Rectangle {
+    background: Theme.card;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.line;
+}
+
+export component Label inherits Text {
+    color: Theme.soft;
+    font-size: 12px;
+    vertical-alignment: center;
+}
+
+export component Btn {
+    in property <string> text;
+    // 0 quiet, 1 primary, 2 danger
+    in property <int> kind: 0;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+
+    min-height: 36px;
+    min-width: label.preferred-width + 28px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    forward-focus: scope;
+
+    scope := FocusScope {
+        key-pressed(event) => {
+            if (root.enabled && (event.text == Key.Return || event.text == " ")) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    Rectangle {
+        border-radius: 9px;
+        border-width: scope.has-focus ? 2px : (root.kind == 0 ? 1px : 0px);
+        border-color: scope.has-focus ? Theme.accent : Theme.line;
+        opacity: root.enabled ? 1 : 0.5;
+        background: root.kind == 1
+            ? (touch.has-hover && root.enabled ? Theme.accent.darker(10%) : Theme.accent)
+            : root.kind == 2
+                ? (touch.has-hover && root.enabled ? Theme.bad.darker(10%) : Theme.bad)
+                : (touch.has-hover && root.enabled ? Theme.hover : Theme.card);
+        animate background { duration: 110ms; }
+
+        label := Text {
+            text: root.text;
+            font-size: 13px;
+            font-weight: 600;
+            color: root.kind == 0 ? Theme.ink : Theme.accent-ink;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component Toggle {
+    in property <bool> on;
+    in property <bool> enabled: true;
+    in property <string> name;
+    callback toggled;
+
+    accessible-role: switch;
+    accessible-label: root.name;
+    accessible-checkable: true;
+    accessible-checked: root.on;
+    accessible-action-default => { if root.enabled { root.toggled(); } }
+
+    width: 46px;
+    height: 26px;
+    forward-focus: scope;
+
+    scope := FocusScope {
+        key-pressed(event) => {
+            if (root.enabled && (event.text == Key.Return || event.text == " ")) {
+                root.toggled();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    Rectangle {
+        border-radius: 13px;
+        opacity: root.enabled ? 1 : 0.5;
+        border-width: scope.has-focus ? 2px : 0px;
+        border-color: Theme.ink;
+        background: root.on ? Theme.good : Theme.off;
+        animate background { duration: 140ms; }
+
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            y: 3px;
+            x: root.on ? parent.width - self.width - 3px : 3px;
+            border-radius: 10px;
+            background: Theme.dark ? Theme.ink : #fffaf0;
+            animate x { duration: 140ms; easing: ease-out; }
+        }
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.toggled(); }
+    }
+}
+
+// tone: 0 good, 1 warn, 2 off, 3 trouble
+export component Pill {
+    in property <string> text;
+    in property <int> tone: 0;
+    property <color> fg: tone == 0 ? Theme.good : tone == 1 ? Theme.warn : tone == 2 ? Theme.off : Theme.bad;
+    property <color> tint: tone == 0 ? Theme.good-tint : tone == 1 ? Theme.warn-tint : tone == 2 ? Theme.off-tint : Theme.bad-tint;
+
+    height: 24px;
+    min-width: layout.preferred-width;
+    horizontal-stretch: 0;
+
+    Rectangle {
+        background: root.tint;
+        border-radius: 12px;
+        layout := HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 12px;
+            spacing: 6px;
+            alignment: center;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: root.fg;
+                }
+            }
+            Text {
+                text: root.text;
+                font-size: 12px;
+                font-weight: 600;
+                color: Theme.dark ? Theme.ink : root.fg.darker(15%);
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+export component IconButton {
+    in property <string> commands;
+    in property <string> name;
+    in property <color> tint: Theme.soft;
+    in property <bool> filled: false;
+    in property <float> scale: 0.55;
+    callback clicked;
+
+    accessible-role: button;
+    accessible-label: root.name;
+    accessible-action-default => { root.clicked(); }
+
+    width: 34px;
+    height: 34px;
+
+    Rectangle {
+        border-radius: 8px;
+        background: touch.has-hover ? Theme.hover : transparent;
+        animate background { duration: 110ms; }
+        Path {
+            width: root.width * root.scale;
+            height: root.height * root.scale;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            commands: root.commands;
+            fill: root.filled ? root.tint : transparent;
+            stroke: root.tint;
+            stroke-width: 1.7px;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component SearchBox {
+    in-out property <string> text;
+    in property <string> placeholder;
+    callback edited(string);
+
+    min-height: 40px;
+    horizontal-stretch: 1;
+    forward-focus: input;
+
+    Rectangle {
+        background: Theme.well;
+        border-radius: 10px;
+        border-width: input.has-focus ? 2px : 1px;
+        border-color: input.has-focus ? Theme.accent : Theme.line;
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 6px;
+            spacing: 8px;
+
+            VerticalLayout {
+                alignment: center;
+                Path {
+                    width: 16px;
+                    height: 16px;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: "M11 4a7 7 0 1 0 0 14a7 7 0 1 0 0-14 M16.5 16.5 L21 21";
+                    stroke: Theme.soft;
+                    stroke-width: 1.8px;
+                    fill: transparent;
+                }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+                input := TextInput {
+                    width: 100%;
+                    height: 100%;
+                    text <=> root.text;
+                    color: Theme.ink;
+                    selection-background-color: Theme.accent-tint;
+                    selection-foreground-color: Theme.ink;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                    single-line: true;
+                    accessible-label: root.placeholder;
+                    edited => { root.edited(self.text); }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape && self.text != "") {
+                            self.text = "";
+                            root.edited("");
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+                if root.text == "": Text {
+                    width: 100%;
+                    height: 100%;
+                    text: root.placeholder;
+                    color: Theme.soft;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            if root.text != "": VerticalLayout {
+                alignment: center;
+                IconButton {
+                    name: "Clear search";
+                    scale: 0.42;
+                    commands: "M5 5 L19 19 M19 5 L5 19";
+                    clicked => {
+                        root.text = "";
+                        root.edited("");
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component TabButton {
+    in property <string> text;
+    in property <bool> active;
+    callback clicked;
+
+    accessible-role: tab;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+
+    min-width: label.preferred-width + 24px;
+    min-height: 40px;
+    horizontal-stretch: 0;
+
+    label := Text {
+        text: root.text;
+        font-size: 14px;
+        font-weight: root.active ? 700 : 500;
+        color: root.active ? Theme.accent : (touch.has-hover ? Theme.ink : Theme.soft);
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        y: parent.height - 3px;
+        height: 3px;
+        border-radius: 2px;
+        background: root.active ? Theme.accent : transparent;
+        animate background { duration: 120ms; }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component Scrim {
+    // Eats clicks so nothing behind a dialog can be pressed by accident.
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Theme.scrim;
+        TouchArea { }
+    }
+    @children
+}
+
+export component ChoiceCard {
+    in property <string> title;
+    in property <string> detail;
+    in property <bool> emphasized;
+    callback clicked;
+
+    accessible-role: button;
+    accessible-label: root.title;
+    accessible-action-default => { root.clicked(); }
+    forward-focus: scope;
+
+    scope := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    Rectangle {
+        border-radius: 11px;
+        border-width: root.emphasized || scope.has-focus ? 2px : 1px;
+        border-color: root.emphasized || scope.has-focus ? Theme.accent : Theme.line;
+        background: touch.has-hover ? Theme.hover : Theme.card;
+        animate background { duration: 110ms; }
+
+        VerticalLayout {
+            padding: 14px;
+            spacing: 5px;
+            Text {
+                text: root.title;
+                font-size: 14px;
+                font-weight: 700;
+                color: root.emphasized ? Theme.accent : Theme.ink;
+                wrap: word-wrap;
+            }
+            Text {
+                text: root.detail;
+                font-size: 12.5px;
+                color: Theme.soft;
+                wrap: word-wrap;
+            }
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}

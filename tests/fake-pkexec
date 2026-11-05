@@ -1,0 +1,9 @@
+#!/bin/sh
+# Stand-in for pkexec. Records argv, then runs the command as the fake "root".
+# FAKE_PKEXEC_MODE: ok (default) | dismissed (126) | refused (127)
+printf '%s\n' "$*" >> "${FAKE_PKEXEC_LOG:?}"
+case "${FAKE_PKEXEC_MODE:-ok}" in
+  dismissed) exit 126 ;;
+  refused) exit 127 ;;
+esac
+FAKE_TS_AS_ROOT=1 exec "$@"

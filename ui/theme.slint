@@ -1,0 +1,29 @@
+// Warm and earthy on purpose. Light is parchment and terracotta; dark is
+// chocolate rather than black.
+export global Theme {
+    in-out property <bool> dark: false;
+
+    out property <color> bg: dark ? #2c211a : #f4ecdd;
+    out property <color> card: dark ? #3a2c23 : #fdf8ee;
+    out property <color> well: dark ? #33261e : #efe5d2;
+    out property <color> hover: dark ? #46362b : #f1e6d3;
+    out property <color> line: dark ? #54422f : #e2d4bb;
+    out property <color> ink: dark ? #f3e8d6 : #3b2a1e;
+    out property <color> soft: dark ? #c2ad94 : #76604c;
+    out property <color> accent: dark ? #e08a5f : #b4562f;
+    out property <color> accent-ink: dark ? #2c211a : #fff8ec;
+    out property <color> accent-tint: dark ? #54382a : #f6dfcd;
+    out property <color> good: dark ? #9dbb7d : #5f7f45;
+    out property <color> good-tint: dark ? #3e4a2e : #e3ebd0;
+    out property <color> warn: dark ? #e0b45c : #a66f10;
+    out property <color> warn-tint: dark ? #54432a : #f8e8c2;
+    out property <color> bad: dark ? #e88a70 : #a63f26;
+    out property <color> bad-tint: dark ? #5a3126 : #f7dcd2;
+    out property <color> off: dark ? #a8947c : #8d7a66;
+    out property <color> off-tint: dark ? #46382c : #e8dfd0;
+    out property <color> scrim: dark ? #1e150fb0 : #3b2a1e70;
+    out property <color> star: dark ? #e0b45c : #c98a1a;
+
+    out property <string> display-font: "Noto Serif";
+    out property <string> mono-font: "Noto Sans Mono";
+}

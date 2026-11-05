@@ -1,0 +1,33 @@
+[package]
+name = "tailgate"
+version = "0.1.0"
+edition = "2021"
+description = "A native Linux desktop app for Tailscale and its Mullvad exit nodes"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nunyabiz765/tailgate"
+publish = false
+
+[lib]
+name = "tailgate"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tailgate"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software"] }
+
+[dev-dependencies]
+libc = "0.2"
+
+[build-dependencies]
+slint-build = "1.18"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

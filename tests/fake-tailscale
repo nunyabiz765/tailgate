@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Stand-in for the tailscale CLI. Records argv, keeps fake state, and can misbehave.
+
+  FAKE_TS_LOG    file that receives one JSON argv per line (required)
+  FAKE_TS_STATE  file holding fake prefs/running state (default: alongside the log)
+  FAKE_TS_MODE   ok | denied | denied-until-operator | slow | gone | malformed | fail | login | stopped
+  FAKE_TS_FIXTURE  status JSON to serve (default: tests/fixtures/status.json)
+Never touches the real daemon: it has no way to reach one.
+"""
+import json, os, sys, time
+
+args = sys.argv[1:]
+log = os.environ["FAKE_TS_LOG"]
+with open(log, "a") as f:
+    f.write(json.dumps(args) + "\n")
+
+mode = os.environ.get("FAKE_TS_MODE", "ok")
+here = os.path.dirname(os.path.abspath(__file__))
+fixture = os.environ.get("FAKE_TS_FIXTURE", os.path.join(here, "fixtures", "status.json"))
+state_path = os.environ.get("FAKE_TS_STATE", log + ".state")
+
+status = json.load(open(fixture))
+try:
+    state = json.load(open(state_path))
+except (OSError, ValueError):
+    current = (status.get("ExitNodeStatus") or {}).get("ID", "")
+    state = {"exit": current, "lan": True, "running": mode != "stopped", "operator": ""}
+
+def save():
+    json.dump(state, open(state_path, "w"))
+
+def peers():
+    return (status.get("Peer") or {}).values()
+
+def die(msg, code=1):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+def check_rights():
+    root = os.environ.get("FAKE_TS_AS_ROOT") == "1"
+    if mode == "denied" and not root:
+        die("Access denied: checkprefs access denied")
+    if mode == "denied-until-operator" and not root and not state["operator"]:
+        die("Access denied: checkprefs access denied")
+
+if mode == "slow":
+    time.sleep(60)
+if mode == "fail":
+    die("failed to connect to local tailscaled; it doesn't appear to be running")
+if mode == "malformed":
+    print("{ this is not json")
+    sys.exit(0)
+
+head = args[0] if args else ""
+if head == "status":
+    if not state["running"]:
+        print(json.dumps({"BackendState": "Stopped", "TailscaleIPs": None, "Self": status["Self"], "Peer": None, "ExitNodeStatus": None, "Health": []}))
+    elif mode == "login":
+        print(json.dumps({"BackendState": "NeedsLogin", "AuthURL": "https://login.tailscale.com/a/fake", "Self": status["Self"], "Peer": None}))
+    else:
+        for p in peers():
+            p["ExitNode"] = p.get("ID") == state["exit"]
+        status["ExitNodeStatus"] = {"ID": state["exit"], "Online": True} if state["exit"] else None
+        print(json.dumps(status))
+elif args == ["debug", "prefs"]:
+    prefs = {"ExitNodeID": state["exit"], "ExitNodeAllowLANAccess": state["lan"], "WantRunning": state["running"], "Persist": {"PrivateNodeKey": "fake-should-never-appear"}}
+    if state["operator"]:
+        prefs["OperatorUser"] = state["operator"]
+    print(json.dumps(prefs))
+elif args[:2] == ["serve", "status"]:
+    if args[2:] == ["--json"]:
+        print(json.dumps({"TCP": {"443": {"HTTPS": True}, "2222": {"TCPForward": "127.0.0.1:22", "TerminateTLS": "fakehost.example.ts.net"}, "5432": {"TCPForward": "127.0.0.1:5432", "TerminateTLS": "fakehost.example.ts.net"}}, "Web": {"fakehost.example.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3000"}}}}}))
+    else:
+        print("https://fakehost.example.ts.net (tailnet only)\n|-- / proxy http://127.0.0.1:3000\n\n|-- tcp://fakehost.example.ts.net:2222 (TLS-terminated TCP, tailnet only)\n|--> tcp://127.0.0.1:22\n\n|-- tcp://fakehost.example.ts.net:5432 (TLS-terminated TCP, tailnet only)\n|--> tcp://127.0.0.1:5432")
+elif head == "set":
+    check_rights()
+    for flag in args[1:]:
+        name, _, value = flag.partition("=")
+        if name == "--exit-node":
+            if value and mode == "gone":
+                die(f'invalid value "{value}" for --exit-node: no node found in netmap with IP {value}')
+            if value:
+                match = [p for p in peers() if value in (p.get("TailscaleIPs") or [])]
+                if not match:
+                    die(f'invalid value "{value}" for --exit-node: no node found in netmap with IP {value}')
+                state["exit"] = match[0]["ID"]
+            else:
+                state["exit"] = ""
+        elif name == "--exit-node-allow-lan-access":
+            state["lan"] = value == "true"
+        elif name == "--operator":
+            state["operator"] = value
+        else:
+            die(f"flag provided but not defined: {name}", 2)
+    save()
+elif args == ["up"]:
+    check_rights()
+    state["running"] = True
+    save()
+elif args == ["down"]:
+    check_rights()
+    state["running"] = False
+    save()
+else:
+    die(f"fake-tailscale: refusing unknown command {args}", 64)
