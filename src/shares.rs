@@ -240,6 +240,7 @@ pub struct Tools {
     pub smbutil: PathBuf,
     pub mount: PathBuf,
     pub diskutil: PathBuf,
+    pub umount: PathBuf,
     pub net: PathBuf,
     pub explorer: PathBuf,
     pub probe: PathBuf,
@@ -275,6 +276,7 @@ impl Tools {
             smbutil: pick("/usr/bin/smbutil", "smbutil"),
             mount: pick("/sbin/mount", "mount"),
             diskutil: pick("/usr/sbin/diskutil", "diskutil"),
+            umount: pick("/sbin/umount", "umount"),
             net: pick(&net.to_string_lossy(), "net"),
             explorer: pick(&explorer.to_string_lossy(), "explorer"),
             probe: pick("", "probe"),
@@ -811,11 +813,24 @@ pub fn disconnect(tools: &Tools, mounted: &Mounted) -> Result<(), String> {
     let Some(cmd) = tools.disconnect_cmd(mounted) else {
         return Err(format!("{} was connected by the system, not Tailgate, so disconnect it there.", mounted.share));
     };
-    match cmd.run(CONNECT_TIMEOUT) {
-        Ok(out) if out.success => Ok(()),
-        Ok(out) => Err(first_line(&out).unwrap_or_else(|| format!("{} failed.", cmd.display()))),
-        Err(e) => Err(e.to_string()),
+    let first = match cmd.run(CONNECT_TIMEOUT) {
+        Ok(out) if out.success => return Ok(()),
+        Ok(out) => first_line(&out).unwrap_or_else(|| format!("{} failed.", cmd.display())),
+        Err(e) => e.to_string(),
+    };
+    // A share Finder has only just mounted is often still busy for a moment
+    // (Spotlight, the Finder window it opened). One more try with plain umount,
+    // which never forces anything.
+    if tools.os == Os::Mac {
+        thread::sleep(Duration::from_secs(2));
+        if let Ok(out) = Cmd::new(&tools.umount, &[&mounted.location]).run(CONNECT_TIMEOUT) {
+            if out.success {
+                return Ok(());
+            }
+        }
+        return Err(format!("{first}. Close any windows or files using it and try again."));
     }
+    Err(first)
 }
 
 pub fn open(tools: &Tools, mounted: &Mounted) -> Result<(), String> {

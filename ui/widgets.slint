@@ -339,19 +339,21 @@ export component Field {
 export component TabButton {
     in property <string> text;
     in property <bool> active;
+    // Narrow windows: five tabs have to fit in 400px.
+    in property <bool> compact;
     callback clicked;
 
     accessible-role: tab;
     accessible-label: root.text;
     accessible-action-default => { root.clicked(); }
 
-    min-width: label.preferred-width + 24px;
+    min-width: label.preferred-width + (root.compact ? 10px : 24px);
     min-height: 40px;
     horizontal-stretch: 0;
 
     label := Text {
         text: root.text;
-        font-size: 14px;
+        font-size: root.compact ? 13px : 14px;
         font-weight: root.active ? 700 : 500;
         color: root.active ? Theme.accent : (touch.has-hover ? Theme.ink : Theme.soft);
         horizontal-alignment: center;

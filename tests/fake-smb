@@ -1,6 +1,6 @@
 #!/bin/sh
 # Stands in for the programs the Shares tab runs (gio, smbclient, open, mount,
-# diskutil, net, explorer, xdg-open) plus a "probe" for port 445, so tests and
+# diskutil, umount, net, explorer, xdg-open) plus a "probe" for port 445, so tests and
 # screenshots never touch a real network or mount anything.
 #
 # usage: fake-smb NAME [ARGS...]   (the tests make one wrapper per NAME)
@@ -9,7 +9,7 @@
 #        FAKE_SMB_HOSTS  hosts that answer on port 445 (space-separated)
 #        FAKE_SMB_LIST   hosts that list their shares to anyone
 #        FAKE_SMB_SHARES share names those hosts list (space-separated)
-#        FAKE_SMB_MODE   ok (default), needs-password, unsupported, slow
+#        FAKE_SMB_MODE   ok (default), needs-password, unsupported, slow, busy
 name=$1; shift
 state=${FAKE_SMB_STATE:-/tmp/fake-smb-state}
 touch "$state"
@@ -53,7 +53,10 @@ open)
 mount)
   grep 'smbfs' "$state"; exit 0 ;;
 diskutil)
+  [ "$mode" = busy ] && { echo "Unmount failed for $2" >&2; exit 1; }
   drop " on $2 ("; echo "Volume $2 on disk unmounted"; exit 0 ;;
+umount)
+  drop " on $1 ("; exit 0 ;;
 net)
   sub=$1; shift
   case "$sub" in

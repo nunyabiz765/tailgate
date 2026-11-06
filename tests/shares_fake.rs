@@ -16,7 +16,7 @@ struct Fake {
     tools: Tools,
 }
 
-const NAMES: [&str; 9] = ["probe", "smbclient", "gio", "open", "mount", "diskutil", "net", "explorer", "xdg-open"];
+const NAMES: [&str; 10] = ["probe", "smbclient", "gio", "open", "mount", "diskutil", "umount", "net", "explorer", "xdg-open"];
 
 fn write_script(path: &Path, body: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -134,6 +134,18 @@ fn mac_hands_the_url_to_finder_and_sees_the_mount() {
     let calls = fake.calls();
     assert!(calls.contains(&"open -g smb://pat@100.64.0.5/Media".to_string()), "{calls:?}");
     assert!(calls.contains(&"diskutil unmount /Volumes/Media".to_string()), "{calls:?}");
+}
+
+#[test]
+fn mac_retries_a_busy_unmount_with_plain_umount() {
+    let fake = Fake::new(Os::Mac, "busy");
+    shares::connect(&fake.tools, &home(), false);
+    let mounted = shares::list_mounted(&fake.tools);
+    shares::disconnect(&fake.tools, &mounted[0]).unwrap();
+    assert!(shares::list_mounted(&fake.tools).is_empty());
+    let calls = fake.calls();
+    assert!(calls.contains(&"umount /Volumes/Media".to_string()), "{calls:?}");
+    assert!(!calls.iter().any(|c| c.contains("force") || c.contains(" -f")), "never forced: {calls:?}");
 }
 
 #[test]

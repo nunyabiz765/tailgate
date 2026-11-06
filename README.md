@@ -34,6 +34,7 @@ The screenshots use the bundled fake CLI and made-up data, which is why the bann
 - **Allow LAN access:** `tailscale set --exit-node-allow-lan-access=true|false`.
 - **Tailscale up and down:** down asks first, and lists what it would cut from the live `tailscale serve status`.
 - **Devices** and a read-only **Serving** view.
+- **Shares** (new in 0.3): finds SMB file shares on your tailnet's devices and connects them with one click, the way your OS normally does. Each share can connect at login, and comes back after sleep or when Tailscale reconnects. See [File shares](#file-shares).
 - **Check my IP:** asks `https://am.i.mullvad.net/json` through curl, only when you click it. That's the only network request Tailgate makes itself.
 - **Light and dark** themes, and a layout that adapts to narrow windows.
 
@@ -96,13 +97,34 @@ rm ~/.local/share/icons/hicolor/*/apps/tailgate.*
 rm -r ~/.config/tailgate
 ```
 
+## File shares
+
+The **Shares** tab looks for file shares (SMB, what Finder, File Explorer and Files use) on the devices in your tailnet:
+
+1. It asks each online device whether it takes connections on the file-sharing port (TCP 445). Nothing else is sent to a device that doesn't answer.
+2. On the ones that do, it tries to list the share names without asking for anything: `smbclient -L` and `gio list` on Linux, `smbutil view -N` on macOS, `net view` on Windows. Many servers only list shares after you sign in; those show up with an **Add share** link so you can type the name (Home, Photos...). **Add share** at the top takes any device name or Tailscale IP.
+
+**Connect** uses the system's own SMB client:
+
+- **macOS:** `open -g smb://user@host/Share`. Finder mounts it under `/Volumes`, signing in from your Keychain, or asks with its usual dialog (tick *Remember this password in my keychain*).
+- **Windows:** `net use * \\host\Share /persistent:no`, which maps the next free drive letter. If Windows Credential Manager has no sign-in for that device, Tailgate opens the share in File Explorer, which asks (tick *Remember my credentials*); press Connect again afterwards to get the drive letter.
+- **Linux:** `gio mount smb://user@host/Share`, so it appears in the Files sidebar like any share you'd open there. If your keyring has no saved password, Tailgate opens the share in your file manager, which asks and can save it (*Remember forever* in GNOME Files). This needs gvfs's SMB backend: the `gvfs-backends` package on Ubuntu, Mint, Zorin and Pop!_OS (usually installed already), `gvfs-smb` on Arch and Fedora. Without it Tailgate opens the share in the file manager instead, and can't keep it connected.
+
+**Tailgate never sees or stores a password.** `state.json` gets the host, share name and optional user name; the password stays in the OS keychain, and every prompt is the OS's own.
+
+**Connect at login**: each share has an *At login* switch. Those shares connect when Tailgate starts, and again whenever Tailscale comes back: after sleep, after a network change that took Tailscale down, or when that device comes back online. Retries back off (right away, then 5 s, 20 s, 1 min, 3 min, 10 min) and stop after six tries until the next time Tailscale reconnects. A share that needs a sign-in, or that you disconnected yourself, is left alone until you press Connect, so nothing pops up a password dialog on its own (except on macOS, where Finder can, as it does for any login item that mounts a share).
+
+**Open Tailgate at login**, the switch at the top of the tab, is what makes *At login* happen when you sign in. It uses the normal per-user mechanism, so no admin rights: `~/.config/autostart/tailgate.desktop` on Linux, `~/Library/LaunchAgents/dev.centerpointlabs.tailgate.plist` on macOS, and the `HKCU\...\Run` key on Windows. Tailgate starts minimized (`tailgate --login`). On Windows, the portable Tailgate.exe has to stay where it was when you turned this on.
+
+From a terminal: `tailgate --shares` lists what it finds and what's connected (read-only), and `tailgate --connect-share //user@host/Share` / `--disconnect-share` do what the buttons do.
+
 ## Read-only mode
 
 ```sh
 tailgate --read-only
 ```
 
-This shows live status and refuses every change before anything is run.
+This shows live status and refuses every change before anything is run, including connecting or disconnecting file shares and changing the login item.
 
 ## Permissions
 
@@ -123,7 +145,7 @@ sudo tailscale set --operator=
 
 ## Settings
 
-Tailgate keeps favorites, the last-used node and view settings in `state.json`: `~/.config/tailgate/` on Linux, `%APPDATA%\Tailgate\` on Windows, `~/Library/Application Support/Tailgate/` on macOS. There are no secrets in it.
+Tailgate keeps favorites, the last-used node, view settings and your file shares (host, share and user names only) in `state.json`: `~/.config/tailgate/` on Linux, `%APPDATA%\Tailgate\` on Windows, `~/Library/Application Support/Tailgate/` on macOS. There are no secrets in it.
 
 Served ports show as "Port 8443". To give them names, create `labels.json` in the same folder. Tailgate only ever reads this file. Ports with the same name are grouped together in the turn-off dialog.
 
@@ -137,6 +159,7 @@ As of 0.2.0:
 
 - **Windows:** built and tested only in CI, on GitHub's Windows Server runner: the test suite (including the fake CLI), and the window opening both with no Tailscale installed and against the fake. **It hasn't been run on a real Windows PC or against a real Tailscale for Windows yet.**
 - **macOS:** tested on one Apple Silicon MacBook Air (macOS 26.6, Tailscale Standalone 1.104 with the CLI integration): the test suite, finding Tailscale from a Finder-like environment, and the window reading live status read-only. No change has been made through Tailgate on a Mac yet. The Mac App Store variant is detected and explained but hasn't been tried, and the Intel half of the universal build has only run on CI.
+- **Shares (0.3):** on Linux, tested on Arch/KDE against a Samba server over Tailscale: finding devices on 445, connecting through `gio mount` with the password in the keyring, the no-saved-password case, Disconnect, connecting at startup, and reconnecting after Tailscale went down and came back (with a stand-in Tailscale CLI). On macOS, connecting and disconnecting a share through Finder with Keychain sign-in was tried from the command line (`--connect-share`); the window's Shares tab hasn't been clicked through on a Mac. **On Windows, Shares has only run against stand-ins** (the tests drive the exact `net use`/`net view`/`explorer` command lines, and parse sample output); it hasn't connected a real share, and `net view` output in languages other than English may not list share names (Add share still works). Waking from sleep is detected from the clock but hasn't been tested on real hardware.
 - **Signing:** the Windows build isn't code-signed yet, so first launch needs the extra click described in `READ ME FIRST.txt`. The macOS build is signed with a Developer ID, notarized and stapled.
 
 Linux, as of 0.1.0, updated after release:
@@ -186,6 +209,8 @@ grep -vE 'status|prefs' /tmp/ts.log
 
 Other test overrides: `TAILGATE_OPEN_BIN`, `TAILGATE_IPCHECK_URL`, `TAILGATE_READ_TIMEOUT_MS`.
 
+`tests/fake-smb` does the same for the Shares tab: it stands in for `gio`, `smbclient`, `open`, `mount`, `diskutil`, `net`, `explorer` and `xdg-open`, plus a `probe` that replaces the port-445 check, and keeps its "mounts" in a file. Point `TAILGATE_SHARES_TOOLS` at a folder of wrappers named after those programs (see `tests/shares_fake.rs` or `tools/shares-shots.sh`), and nothing real is probed or mounted. `tests/shares_fake.rs` runs the Linux, macOS and Windows command sets against it on any Unix. With `TAILGATE_CONFIG_DIR` set, *Open Tailgate at login* writes into that folder instead of the real login items.
+
 On Windows the tests wrap the fake in a `.cmd` that runs it with `python`. CI (`.github/workflows/release.yml`) runs `cargo test` on Linux, Windows and macOS, opens the window against the fake on all three, and builds the release downloads on every `v*` tag.
 
 `tools/drive-fake.sh` and `tools/drive-states.sh` run the real window on a private Xvfb display, click through every control with XTEST, and save screenshots. `tools/public-shots.sh` retakes the screenshots above. Their coordinates match the default window size, so they need updating if the layout moves.
@@ -197,6 +222,7 @@ On Windows the tests wrap the fake in a `.cmd` that runs it with `python`. CI (`
 - `src/nodes.rs`: picker rows and search
 - `src/summary.rs`: the headline, and what `down` cuts
 - `src/store.rs`, `src/ipcheck.rs`: saved settings and labels, Check my IP
+- `src/shares.rs`: finding, connecting and watching file shares, and the reconnect schedule; `src/autostart.rs`: Open Tailgate at login; `src/shares_cli.rs`: the `--shares` flags
 - `src/app.rs`: connects the window to all of the above
 - `ui/`: Slint markup
 
