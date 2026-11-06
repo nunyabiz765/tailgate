@@ -77,8 +77,13 @@ impl Fake {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let wrapper = fake_tailscale(&dir, mode);
-        #[cfg_attr(windows, allow(unused_mut))]
         let mut client = Client::with_bin(&wrapper);
+        // On Windows the fake is Python behind a .cmd, and a cold start on a CI runner
+        // (antivirus scanning python.exe) can take longer than the app's 8 s read deadline.
+        #[cfg(windows)]
+        {
+            client.read_timeout = Duration::from_secs(45);
+        }
         #[cfg(unix)]
         {
             let pkexec = dir.join("pkexec");
