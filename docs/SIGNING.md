@@ -5,8 +5,14 @@ signed (Apple Silicon needs some signature to run at all) and not notarized; the
 code-signed. Both work, but the first launch needs one extra click, which each download's
 `READ ME FIRST.txt` explains.
 
-The release workflow is already wired for macOS signing and notarization: it switches on by itself
-once the repository secrets below exist. Nothing else in the repo has to change.
+The release workflow is already wired for macOS signing and notarization and for Windows signing
+through Azure Artifact Signing: each switches on by itself once its repository secrets exist.
+Nothing else in the repo has to change.
+
+**Shared with Plaza.** Tailgate uses the same Apple team, the same Developer ID Application
+certificate, the same notary API key and the same Azure signing account as
+[Plaza](https://github.com/nunyabiz765/plaza). The secret names are identical in both repos, so
+the setup is done once and the same values go into both. Don't create a second certificate.
 
 ## macOS: Developer ID + notarization
 
@@ -31,10 +37,11 @@ file`, so no value is ever printed):
 |---|---|
 | `MACOS_CERT_P12` | `base64 -i DeveloperID.p12` |
 | `MACOS_CERT_PASSWORD` | the export password |
-| `MACOS_SIGN_IDENTITY` | `Developer ID Application: <name> (X993AH3NS8)`, exactly as `security find-identity -v -p codesigning` prints it |
 | `NOTARY_KEY_P8` | `base64 -i AuthKey_XXXXXX.p8` |
 | `NOTARY_KEY_ID` | the Key ID |
-| `NOTARY_ISSUER` | the Issuer ID |
+| `NOTARY_ISSUER_ID` | the Issuer ID |
+
+`MACOS_SIGN_IDENTITY` is optional: CI reads the "Developer ID Application: …" name from the .p12.
 
 The next tag then signs with the hardened runtime and a timestamp, notarizes the `.dmg`, staples
 the ticket and checks it with `spctl`. Released assets are never replaced, so a signed build ships
@@ -48,7 +55,24 @@ keychain is unlocked in the GUI session first.
 
 Cost: nothing extra; the Apple Developer Program membership already covers Developer ID.
 
-## Windows: options (nothing bought)
+## Windows: Azure Artifact Signing (approved; Nick sets up the account)
+
+Nick chose Azure Artifact Signing (formerly Trusted Signing), Basic tier. The click-by-click setup
+is the same as Plaza's (`~/Downloads/plaza/SIGNING-WINDOWS.md` on obsidian2); one signing account
+and one certificate profile cover both apps. The workflow then signs `tailgate.exe` with
+`azure/artifact-signing-action@v2` (SHA256, Microsoft timestamp) before zipping and fails the
+build unless `Get-AuthenticodeSignature` reports **Valid**. Repository secrets:
+
+| Secret | Value |
+|---|---|
+| `AZURE_TENANT_ID` | Directory (tenant) ID |
+| `AZURE_CLIENT_ID` | Application (client) ID of the GitHub signing app |
+| `AZURE_CLIENT_SECRET` | that app's client secret value |
+| `AZURE_SIGNING_ENDPOINT` | e.g. `https://eus.codesigning.azure.net/` (must match the account's region) |
+| `AZURE_SIGNING_ACCOUNT` | the signing account name |
+| `AZURE_CERT_PROFILE` | the certificate profile name |
+
+## Windows: the options that were compared (nothing bought)
 
 SmartScreen warns about any new download until it builds a reputation. A signature names the
 publisher, and reputation then accrues to that publisher instead of to each file. Since 2024 no

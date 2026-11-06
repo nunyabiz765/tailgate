@@ -4,10 +4,15 @@
 # already there fails instead. Pushes to main and workflow_dispatch run the same builds and
 # tests and keep the results as workflow artifacts only.
 #
-# macOS signing is optional and switches on by itself when these repository secrets exist
-# (see docs/SIGNING.md): MACOS_CERT_P12 (base64 Developer ID Application .p12),
-# MACOS_CERT_PASSWORD, MACOS_SIGN_IDENTITY, and for notarization NOTARY_KEY_P8 (base64 App
-# Store Connect API key), NOTARY_KEY_ID, NOTARY_ISSUER. Without them the app is ad-hoc signed.
+# Signing is optional and switches on by itself when the repository secrets exist (see
+# docs/SIGNING.md). The names match nunyabiz765/plaza, so one Developer ID certificate and
+# one Azure signing account serve both apps.
+# macOS: MACOS_CERT_P12 (base64 Developer ID Application .p12), MACOS_CERT_PASSWORD, and for
+# notarization NOTARY_KEY_P8 (base64 App Store Connect API key), NOTARY_KEY_ID,
+# NOTARY_ISSUER_ID. MACOS_SIGN_IDENTITY is optional; the identity is read from the .p12.
+# Without them the app is ad-hoc signed.
+# Windows (Azure Artifact Signing): AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET,
+# AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT, AZURE_CERT_PROFILE. Unsigned without them.
 name: release
 
 on:
@@ -62,6 +67,7 @@ jobs:
       # Static C runtime: Tailgate.exe runs without the Visual C++ redistributable.
       RUSTFLAGS: -C target-feature=+crt-static
       PYTHON: python
+      HAVE_AZ_SIGN: ${{ secrets.AZURE_CLIENT_SECRET != '' }}
     defaults:
       run: { shell: bash }
     steps:
@@ -111,6 +117,40 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with: { name: shot-windows, path: shots/*, if-no-files-found: warn }
+      - name: Sign Tailgate.exe (only with the secrets set)
+        if: env.HAVE_AZ_SIGN == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE }}
+          files-folder: ${{ github.workspace }}\target\release
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Tailgate
+          description-url: https://github.com/nunyabiz765/tailgate
+          exclude-environment-credential: false
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: true
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+      - name: Check the signature (only with the secrets set)
+        if: env.HAVE_AZ_SIGN == 'true'
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature target/release/tailgate.exe
+          $sig | Format-List Status, StatusMessage, SignerCertificate
+          if ($sig.Status -ne 'Valid') { throw "Tailgate.exe signature is $($sig.Status)" }
       - run: tools/package-windows.sh target/release/tailgate.exe dist
       - uses: actions/upload-artifact@v7
         with: { name: dist-windows, path: dist/*, if-no-files-found: error }
@@ -151,9 +191,9 @@ jobs:
           MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
           NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
-          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
         run: |
-          if [ -z "$MACOS_CERT_P12" ] || [ -z "$MACOS_SIGN_IDENTITY" ]; then
+          if [ -z "$MACOS_CERT_P12" ]; then
             echo "No signing secrets: the app will be ad-hoc signed."; exit 0
           fi
           KC=$RUNNER_TEMP/signing.keychain-db; KCPASS=$(uuidgen)
@@ -165,11 +205,15 @@ jobs:
           rm "$RUNNER_TEMP/cert.p12"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KCPASS" "$KC" >/dev/null
           security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          if [ -z "$MACOS_SIGN_IDENTITY" ]; then
+            MACOS_SIGN_IDENTITY=$(security find-identity -v -p codesigning "$KC" | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)
+          fi
+          test -n "$MACOS_SIGN_IDENTITY" || { echo "No Developer ID Application identity in the .p12"; exit 1; }
           echo "MACOS_SIGN_IDENTITY=$MACOS_SIGN_IDENTITY" >> "$GITHUB_ENV"
           if [ -n "$NOTARY_KEY_P8" ]; then
             echo "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
             xcrun notarytool store-credentials tailgate-notary --key "$RUNNER_TEMP/notary.p8" \
-              --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" --keychain "$KC"
+              --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" --keychain "$KC"
             rm "$RUNNER_TEMP/notary.p8"
             echo "NOTARY_PROFILE=tailgate-notary" >> "$GITHUB_ENV"
             echo "NOTARY_KEYCHAIN=$KC" >> "$GITHUB_ENV"
