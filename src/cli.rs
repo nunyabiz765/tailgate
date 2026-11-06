@@ -364,6 +364,11 @@ pub fn discover_macos(env: &Probe) -> Found {
     }
 }
 
+/// Whether `name` is a file somewhere on PATH.
+pub fn on_path(name: &str) -> bool {
+    find_on(std::env::var_os("PATH").as_ref(), name, &|p: &Path| p.is_file()).is_some()
+}
+
 fn find_on(paths: Option<&OsString>, name: &str, is_file: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
     std::env::split_paths(paths?).map(|dir| dir.join(name)).find(|candidate| is_file(candidate))
 }

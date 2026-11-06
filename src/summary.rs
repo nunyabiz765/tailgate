@@ -1,5 +1,6 @@
 //! Wording that depends on current state: the headline, and what "down" cuts.
 
+use crate::cli::CliError;
 use crate::status::{service_name, Backend, Peer, Prefs, ServeEntry, Status};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +170,21 @@ pub fn down_impact(status: Option<&Status>, serve: Option<&[ServeEntry]>) -> Vec
     lines
 }
 
+/// Which first-run step the Linux setup guide should show: 0 none (Tailscale
+/// answered and is signed in), 1 install Tailscale, 2 start tailscaled, 3 sign in.
+pub fn setup_step(status: Result<&Status, &CliError>) -> i32 {
+    match status {
+        Ok(status) if status.backend == Backend::NeedsLogin => 3,
+        Ok(_) => 0,
+        Err(CliError::Missing(_)) => 1,
+        Err(CliError::Failed(message)) => {
+            let m = message.to_lowercase();
+            if m.contains("tailscaled") || m.contains("tailscale daemon") { 2 } else { 0 }
+        }
+        Err(_) => 0,
+    }
+}
+
 /// Plain-English backend state for the "Tailscale" row.
 pub fn is_up(status: Option<&Status>) -> bool {
     matches!(status.map(|s| &s.backend), Some(Backend::Running | Backend::Starting))
@@ -178,6 +194,22 @@ pub fn is_up(status: Option<&Status>) -> bool {
 mod tests {
     use super::*;
     use crate::status::parse_status;
+
+    #[test]
+    fn setup_step_follows_first_run() {
+        let missing = CliError::Missing("tailscale".into());
+        assert_eq!(setup_step(Err(&missing)), 1);
+        let old = CliError::Failed("failed to connect to local tailscaled; it doesn't appear to be running (sudo systemctl start tailscaled ?)".into());
+        assert_eq!(setup_step(Err(&old)), 2);
+        let new = CliError::Failed("Failed to connect to local Tailscale daemon for /localapi/v0/status; not running?".into());
+        assert_eq!(setup_step(Err(&new)), 2);
+        assert_eq!(setup_step(Err(&CliError::Failed("something else".into()))), 0);
+        assert_eq!(setup_step(Err(&CliError::Timeout(std::time::Duration::from_secs(1)))), 0);
+        let login = parse_status(r#"{"BackendState":"NeedsLogin"}"#).unwrap();
+        assert_eq!(setup_step(Ok(&login)), 3);
+        let stopped = parse_status(r#"{"BackendState":"Stopped"}"#).unwrap();
+        assert_eq!(setup_step(Ok(&stopped)), 0);
+    }
 
     fn running(exit: bool) -> Status {
         let exit_status = if exit { r#""ExitNodeStatus":{"ID":"dal"},"# } else { "" };

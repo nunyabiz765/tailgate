@@ -77,6 +77,10 @@ struct State {
     busy: Option<String>,
     confirm: Option<Pending>,
     permission: Option<Action>,
+    /// First-run guide step on Linux (see summary::setup_step); 0 hides it.
+    setup: i32,
+    /// "Sign in" was clicked, so open the login page as soon as Tailscale offers one.
+    login_requested: bool,
 }
 
 struct Controller {
@@ -162,9 +166,20 @@ impl Controller {
         if result.generation != self.generation.load(Ordering::SeqCst) {
             return;
         }
+        let mut login_url = None;
         {
             let mut guard = self.state.borrow_mut();
             let state = &mut *guard;
+            // The guide is for Linux, where Tailgate can't point at an installer app.
+            state.setup = if cfg!(target_os = "linux") { summary::setup_step(result.status.as_ref()) } else { 0 };
+            if state.login_requested {
+                if let Ok(url) = result.status.as_ref().map(|s| s.auth_url.as_str()) {
+                    if !url.is_empty() {
+                        state.login_requested = false;
+                        login_url = Some(url.to_string());
+                    }
+                }
+            }
             match result.status {
                 Ok(status) => {
                     state.last_error = None;
@@ -200,6 +215,9 @@ impl Controller {
                     self.save();
                 }
             }
+        }
+        if let Some(url) = login_url {
+            self.open(&url);
         }
         self.render();
     }
@@ -471,6 +489,14 @@ impl Controller {
         );
         app.set_up_label(if up { "Turn off" } else if needs_login { "Log in" } else { "Bring up" }.into());
         app.set_up_enabled(status.is_some());
+        app.set_setup_step(state.setup);
+        app.set_setup_operator(!self.user.is_empty() && prefs.and_then(|p| p.operator.as_deref()) == Some(self.user.as_str()));
+        app.set_setup_user(self.user.clone().into());
+        if state.setup == 1 || state.setup == 2 {
+            app.set_title(if state.setup == 1 { "Tailscale isn't installed" } else { "Tailscale isn't running" }.into());
+            app.set_pill("Setup".into());
+            app.set_detail("Follow the steps on this page. Tailgate notices by itself when it's done.".into());
+        }
         app.set_control_note(
             if prefs.and_then(|p| p.operator.as_deref()) == Some(self.user.as_str()) {
                 format!("{} is the operator.\nUndo: sudo tailscale set --operator=", self.user)
@@ -652,6 +678,12 @@ pub fn run(read_only: bool) -> Result<(), slint::PlatformError> {
         (false, false) => client.variant.note().unwrap_or_default().to_string(),
     };
     let banner_action = if client.variant == cli::Variant::NotFound { "Get Tailscale" } else { "" };
+    let setup_install = if cli::on_path("curl") {
+        "curl -fsSL https://tailscale.com/install.sh | sh"
+    } else {
+        // Stock Ubuntu desktops can lack curl; this still runs the same official script.
+        "sudo apt install -y curl && curl -fsSL https://tailscale.com/install.sh | sh"
+    };
 
     let controller = Rc::new(Controller {
         ui: ui.as_weak(),
@@ -671,6 +703,7 @@ pub fn run(read_only: bool) -> Result<(), slint::PlatformError> {
     let app = ui.global::<AppGlobal>();
     app.set_banner(banner.into());
     app.set_banner_action(banner_action.into());
+    app.set_setup_install(setup_install.into());
     app.on_banner_clicked(|| with(|c| c.open(cli::DOWNLOAD_URL)));
     app.set_version(env!("CARGO_PKG_VERSION").into());
     let user = if controller.user.is_empty() { "your user" } else { controller.user.as_str() };
@@ -746,6 +779,9 @@ pub fn run(read_only: bool) -> Result<(), slint::PlatformError> {
             } else if let Some(url) = login {
                 c.open(&url);
             } else {
+                // `tailscale up` waits for the login, so the page opens from the next poll.
+                let needs_login = c.state.borrow().setup == 3;
+                c.state.borrow_mut().login_requested = needs_login;
                 c.start(Action::Up, false);
             }
         })

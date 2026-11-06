@@ -4,15 +4,16 @@ A native desktop app for [Tailscale](https://tailscale.com) and its Mullvad exit
 
 Free and open source. Written in Rust with [Slint](https://slint.dev). It wraps the `tailscale` CLI you already have.
 
-> **Early release (0.2).** On Linux, status, devices and serving have been read from a real daemon, and switching exit nodes, the Mullvad on/off switch and the operator grant have worked on one. Windows and macOS builds are new in 0.2 and less tried: see [Known limitations](#known-limitations). `tailgate --read-only` is a safe way to look around first.
+> **Early release (0.2.1).** On Linux, status, devices and serving have been read from a real daemon, and switching exit nodes, the Mullvad on/off switch and the operator grant have worked on one. Windows and macOS builds are new in 0.2 and less tried: see [Known limitations](#known-limitations). `tailgate --read-only` is a safe way to look around first.
 
 ## Download
 
 | | Download | |
 |---|---|---|
-| **Windows** 10 / 11, 64-bit | `tailgate-0.2.0-windows-x86_64.zip` | Unzip anywhere and open `Tailgate.exe`. Portable, nothing to install. |
-| **macOS** 11+, Apple Silicon and Intel | `tailgate-0.2.0-macos-universal.dmg` | Drag Tailgate into Applications. |
-| **Linux** x86_64, glibc 2.35+ | `tailgate-0.2.0-x86_64-linux.tar.gz` | Unpack and run `./install.sh` (below). |
+| **Windows** 10 / 11, 64-bit | `tailgate-0.2.1-windows-x86_64.zip` | Unzip anywhere and open `Tailgate.exe`. Portable, nothing to install. |
+| **macOS** 11+, Apple Silicon and Intel | `tailgate-0.2.1-macos-universal.dmg` | Drag Tailgate into Applications. |
+| **Ubuntu, Zorin OS, Linux Mint, Pop!_OS** (22.04 base or newer), x86_64 | `tailgate_0.2.1_amd64.deb` | Double-click it and choose Install (below). |
+| **Other Linux** x86_64, glibc 2.35+ | `tailgate-0.2.1-x86_64-linux.tar.gz` | Unpack and run `./install.sh` (below). |
 
 All from the [latest release](https://github.com/nunyabiz765/tailgate/releases/latest), each with a `.sha256` beside it. The Windows and macOS builds aren't code-signed yet, so the first launch needs one extra click; the `READ ME FIRST.txt` inside each download walks through it.
 
@@ -56,6 +57,16 @@ Tailscale for Mac comes in three variants, and Tailgate tells them apart:
 Apps opened from Finder don't get your shell's `PATH`, so Tailgate also looks in `/usr/local/bin`, `/opt/homebrew/bin`, `/Applications` and `~/Applications` by name. It sets `TAILSCALE_BE_CLI=1`, Tailscale's documented switch, so the app binary answers as a CLI instead of opening a second Tailscale window.
 
 ## Install on Linux
+
+### Ubuntu, Zorin OS, Linux Mint, Pop!_OS
+
+1. Download `tailgate_0.2.1_amd64.deb` from the [latest release](https://github.com/nunyabiz765/tailgate/releases/latest).
+2. Double-click it. It opens in your Software app (Software Manager on Mint, Eddy on Pop!_OS); click **Install** and type your password. Or in a terminal: `sudo apt install ./tailgate_0.2.1_amd64.deb`
+3. Open **Tailgate** from the app menu.
+
+Built for Ubuntu 22.04 and 24.04 and the distros based on them, and Debian 12. Each release installs it with apt on clean Ubuntu 22.04 and 24.04 before publishing; Zorin, Mint and Pop!_OS themselves haven't been tried yet. It doesn't install Tailscale, which isn't in the Ubuntu archive. If Tailscale is missing or not signed in, Tailgate opens on a short setup page with the commands and Copy buttons: Tailscale's official installer (`curl -fsSL https://tailscale.com/install.sh | sh`), signing in, and the one-time operator grant. Uninstall with `sudo apt remove tailgate`.
+
+### Any other distro
 
 Download the tarball from the [latest release](https://github.com/nunyabiz765/tailgate/releases/latest), check it, and run the installer:
 

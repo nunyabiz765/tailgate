@@ -98,6 +98,12 @@ export global App {
     in property <string> operator-detail;
     in property <string> once-detail;
 
+    // First-run guide on Linux: 0 hidden, 1 install Tailscale, 2 start its service, 3 sign in.
+    in property <int> setup-step: 0;
+    in property <string> setup-install;
+    in property <bool> setup-operator;
+    in property <string> setup-user;
+
     in property <string> version;
     in-out property <bool> about-open: false;
 
@@ -677,6 +683,187 @@ component ServePane {
     }
 }
 
+// A terminal command with a Copy button. TextInput holds the text because it
+// owns the clipboard API in Slint.
+component CommandLine {
+    in property <string> command;
+    property <bool> copied;
+
+    Rectangle {
+        background: Theme.well;
+        border-radius: 9px;
+        border-width: 1px;
+        border-color: Theme.line;
+        HorizontalLayout {
+            padding: 8px;
+            padding-left: 12px;
+            spacing: 10px;
+            input := TextInput {
+                text: root.command;
+                read-only: true;
+                single-line: false;
+                wrap: word-wrap;
+                font-family: Theme.mono-font;
+                font-size: 13px;
+                color: Theme.ink;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            VerticalLayout {
+                alignment: center;
+                Btn {
+                    text: root.copied ? "Copied" : "Copy";
+                    clicked => {
+                        input.select-all();
+                        input.copy();
+                        input.clear-selection();
+                        root.copied = true;
+                    }
+                }
+            }
+        }
+    }
+    Timer {
+        interval: 2s;
+        running: root.copied;
+        triggered => { root.copied = false; }
+    }
+}
+
+component SetupStep {
+    in property <int> number;
+    in property <string> title;
+    in property <string> text;
+    in property <bool> done;
+    in property <bool> current;
+
+    HorizontalLayout {
+        spacing: 12px;
+        VerticalLayout {
+            alignment: start;
+            Rectangle {
+                width: 26px;
+                height: 26px;
+                border-radius: 13px;
+                background: root.done ? Theme.good-tint : root.current ? Theme.accent : Theme.well;
+                Text {
+                    text: root.done ? "✓" : root.number;
+                    color: root.done ? Theme.good : root.current ? Theme.accent-ink : Theme.soft;
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 6px;
+            Text {
+                text: root.title;
+                color: root.done ? Theme.soft : Theme.ink;
+                font-size: 15px;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+            if root.text != "": Text {
+                text: root.text;
+                color: Theme.soft;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+            @children
+        }
+    }
+}
+
+// Shown instead of the tabs until Tailscale answers and is signed in.
+component SetupPane {
+    ScrollView {
+        VerticalLayout {
+            padding-right: 12px;
+            padding-top: 6px;
+            padding-bottom: 6px;
+            spacing: 18px;
+            alignment: start;
+            Text {
+                text: App.setup-step == 1 ? "First, install Tailscale"
+                    : App.setup-step == 2 ? "Tailscale is installed but not running"
+                    : "Sign in to Tailscale";
+                font-family: Theme.display-font;
+                font-size: 22px;
+                font-weight: 600;
+                color: Theme.ink;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "Tailgate is a remote control for Tailscale, so Tailscale has to be on this computer and signed in. It takes a couple of minutes, one time only. This page goes away by itself when Tailscale is ready.";
+                color: Theme.soft;
+                font-size: 13.5px;
+                wrap: word-wrap;
+            }
+            if App.setup-step != 2: SetupStep {
+                number: 1;
+                title: "Install Tailscale";
+                done: App.setup-step > 1;
+                current: App.setup-step == 1;
+                text: App.setup-step > 1 ? "Done."
+                    : "Open the Terminal app (press Ctrl + Alt + T), paste this line with Ctrl + Shift + V, and press Enter. Type your computer password when it asks; the letters stay hidden while you type, that's normal.";
+                if App.setup-step == 1: CommandLine { command: App.setup-install; }
+                if App.setup-step == 1: Text {
+                    text: "This runs Tailscale's official installer from tailscale.com. It adds Tailscale's own software source, so updates arrive with your normal system updates.";
+                    color: Theme.soft;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+            if App.setup-step == 2: SetupStep {
+                number: 1;
+                title: "Start Tailscale's background service";
+                current: true;
+                text: "Open the Terminal app (Ctrl + Alt + T), paste this line with Ctrl + Shift + V, and press Enter. Type your computer password when it asks.";
+                CommandLine { command: "sudo systemctl enable --now tailscaled"; }
+            }
+            SetupStep {
+                number: 2;
+                title: "Sign in";
+                current: App.setup-step == 3;
+                text: App.setup-step == 3
+                    ? "Click the button and sign in to your Tailscale account in the browser (making one is free). If the button asks for your password, choose \"Let Tailgate control Tailscale\"."
+                    : "After step 1, sign in to your Tailscale account (making one is free). The button for it appears here.";
+                if App.setup-step == 3: HorizontalLayout {
+                    alignment: start;
+                    Btn {
+                        text: "Sign in to Tailscale";
+                        kind: 1;
+                        enabled: !App.busy;
+                        clicked => { App.toggle-up(); }
+                    }
+                }
+                if App.setup-step == 3: Text {
+                    text: "Or in the Terminal:";
+                    color: Theme.soft;
+                    font-size: 12px;
+                }
+                if App.setup-step == 3: CommandLine { command: "sudo tailscale up"; }
+            }
+            SetupStep {
+                number: 3;
+                title: "Let Tailgate make changes";
+                done: App.setup-operator;
+                text: App.setup-operator
+                    ? "Done: " + App.setup-user + " can change Tailscale without a password."
+                    : "Linux only lets an administrator change Tailscale. The first time you switch something, Tailgate asks for your password once and makes your account Tailscale's operator. To do it ahead of time instead, run:";
+                if !App.setup-operator: CommandLine { command: "sudo tailscale set --operator=$USER"; }
+                if !App.setup-operator: Text {
+                    text: "To undo it later: sudo tailscale set --operator=";
+                    color: Theme.soft;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
+
 component NoticeBar {
     in property <int> kind;
     in property <string> text;
@@ -1083,7 +1270,8 @@ export component AppWindow inherits Window {
                         padding-bottom: 12px;
                         spacing: 10px;
 
-                        HorizontalLayout {
+                        if App.setup-step != 0: SetupPane { vertical-stretch: 1; }
+                        if App.setup-step == 0: HorizontalLayout {
                             alignment: start;
                             spacing: 6px;
                             if App.narrow: TabButton {
@@ -1108,14 +1296,14 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        if App.narrow && App.tab == 0: StatusColumn { vertical-stretch: 1; }
-                        if App.tab == nodes-tab: HorizontalLayout {
+                        if App.setup-step == 0 && App.narrow && App.tab == 0: StatusColumn { vertical-stretch: 1; }
+                        if App.setup-step == 0 && App.tab == nodes-tab: HorizontalLayout {
                             vertical-stretch: 1;
                             padding-right: 10px;
                             NodesPane { }
                         }
-                        if App.tab == devices-tab: DevicesPane { vertical-stretch: 1; }
-                        if App.tab == serve-tab: ServePane { vertical-stretch: 1; }
+                        if App.setup-step == 0 && App.tab == devices-tab: DevicesPane { vertical-stretch: 1; }
+                        if App.setup-step == 0 && App.tab == serve-tab: ServePane { vertical-stretch: 1; }
                     }
                 }
 

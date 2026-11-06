@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.centerpointlabs.tailgate</id>
+  <name>Tailgate</name>
+  <summary>Manage Tailscale and its Mullvad exit nodes</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <developer id="dev.centerpointlabs">
+    <name>Center Point Labs</name>
+  </developer>
+  <description>
+    <p>
+      Tailgate is a desktop app for Tailscale. Pick an exit node by city or country,
+      turn Mullvad on and off, allow LAN access, see your devices and what this
+      machine serves, and check what sites see, without the command line.
+    </p>
+    <p>
+      Tailgate needs Tailscale installed and signed in. If it isn't, Tailgate shows
+      the steps. Not affiliated with or endorsed by Tailscale Inc. or Mullvad VPN AB.
+    </p>
+  </description>
+  <launchable type="desktop-id">tailgate.desktop</launchable>
+  <icon type="stock">tailgate</icon>
+  <url type="homepage">https://centerpointlabs.dev/services/tailgate/</url>
+  <url type="bugtracker">https://github.com/nunyabiz765/tailgate/issues</url>
+  <categories>
+    <category>Network</category>
+  </categories>
+  <keywords>
+    <keyword>tailscale</keyword>
+    <keyword>mullvad</keyword>
+    <keyword>vpn</keyword>
+    <keyword>exit node</keyword>
+  </keywords>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.2.1" date="2026-11-06">
+      <description>
+        <p>A .deb package for Ubuntu, Zorin OS, Linux Mint and Pop!_OS, and a setup guide inside the app when Tailscale isn't installed or signed in yet.</p>
+      </description>
+    </release>
+    <release version="0.2.0" date="2026-11-06"/>
+    <release version="0.1.0" date="2026-11-05"/>
+  </releases>
+</component>
