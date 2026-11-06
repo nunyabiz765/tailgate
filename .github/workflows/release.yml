@@ -84,7 +84,7 @@ jobs:
           apt-get install -y -qq ./dist/tailgate_*_amd64.deb
           dpkg -s tailgate | grep -E '^(Status|Version|Depends|Suggests):'
           test -x /usr/bin/tailgate
-          test -f /usr/share/icons/hicolor/scalable/apps/tailgate.svg
+          test -f /usr/share/icons/hicolor/512x512/apps/tailgate.png
           test -f /usr/share/icons/hicolor/256x256/apps/tailgate.png
       - name: Validate the menu entry and the AppStream data
         env: { DEBIAN_FRONTEND: noninteractive }
@@ -215,6 +215,7 @@ jobs:
       - name: Smoke test (CLI, then the window against the fake CLI, read-only)
         run: |
           B=target/aarch64-apple-darwin/release/tailgate
+          iconutil -c iconset -o "$RUNNER_TEMP/tailgate.iconset" assets/tailgate.icns && ls "$RUNNER_TEMP/tailgate.iconset"
           $B --version
           $B --where || true   # no Tailscale on the runner
           arch -x86_64 target/x86_64-apple-darwin/release/tailgate --version
@@ -238,6 +239,11 @@ jobs:
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
         run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            for key in MACOS_CERT_P12 MACOS_CERT_PASSWORD NOTARY_KEY_P8 NOTARY_KEY_ID NOTARY_ISSUER_ID; do
+              test -n "${!key}" || { echo "Release requires $key"; exit 1; }
+            done
+          fi
           if [ -z "$MACOS_CERT_P12" ]; then
             echo "No signing secrets: the app will be ad-hoc signed."; exit 0
           fi
@@ -254,6 +260,7 @@ jobs:
             MACOS_SIGN_IDENTITY=$(security find-identity -v -p codesigning "$KC" | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)
           fi
           test -n "$MACOS_SIGN_IDENTITY" || { echo "No Developer ID Application identity in the .p12"; exit 1; }
+          test "$MACOS_SIGN_IDENTITY" = 'Developer ID Application: nicksosa.tech LLC (X993AH3NS8)' || { echo "Unexpected signing identity"; exit 1; }
           echo "MACOS_SIGN_IDENTITY=$MACOS_SIGN_IDENTITY" >> "$GITHUB_ENV"
           if [ -n "$NOTARY_KEY_P8" ]; then
             echo "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"

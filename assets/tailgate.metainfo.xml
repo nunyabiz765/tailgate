@@ -36,7 +36,7 @@
   <releases>
     <release version="0.2.1" date="2026-11-06">
       <description>
-        <p>A .deb package for Ubuntu, Zorin OS, Linux Mint and Pop!_OS, and a setup guide inside the app when Tailscale isn't installed or signed in yet.</p>
+        <p>A .deb package for Ubuntu, Zorin OS, Linux Mint and Pop!_OS, and a setup guide inside the app when Tailscale isn't installed or signed in yet, and a new icon.</p>
       </description>
     </release>
     <release version="0.2.0" date="2026-11-06"/>

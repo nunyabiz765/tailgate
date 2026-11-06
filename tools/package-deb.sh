@@ -24,7 +24,6 @@ chmod 644 "$ROOT/usr/share/applications/tailgate.desktop"
 for s in 48 64 128 256 512; do
     install -Dm644 "assets/icons/tailgate-$s.png" "$ROOT/usr/share/icons/hicolor/${s}x${s}/apps/tailgate.png"
 done
-install -Dm644 assets/tailgate.svg "$ROOT/usr/share/icons/hicolor/scalable/apps/tailgate.svg"
 install -Dm644 assets/tailgate.metainfo.xml "$ROOT/usr/share/metainfo/dev.centerpointlabs.tailgate.metainfo.xml"
 
 DOC="$ROOT/usr/share/doc/tailgate"

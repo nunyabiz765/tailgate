@@ -26,6 +26,30 @@ else
   codesign --force --deep --sign - "$APP"
 fi
 codesign --verify --strict --verbose=2 "$APP"
+# Staple the app before creating the final DMG so offline Gatekeeper checks work
+# after dragging it into Applications as well as on the disk image itself.
+notarize() {
+  local artifact=$1 result="$OUT/notary-result.json"
+  local args=(--keychain-profile "$NOTARY_PROFILE")
+  if [ -n "${NOTARY_KEYCHAIN:-}" ]; then args+=(--keychain "$NOTARY_KEYCHAIN"); fi
+  xcrun notarytool submit "$artifact" "${args[@]}" --wait --output-format json > "$result" || true
+  cat "$result"
+  local id status
+  id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("id",""))' "$result")
+  status=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status",""))' "$result")
+  if [ "$status" != Accepted ]; then
+    if [ -n "$id" ]; then xcrun notarytool log "$id" "${args[@]}"; fi
+    return 1
+  fi
+}
+if [ -n "${NOTARY_PROFILE:-}" ]; then
+  ditto -c -k --keepParent "$APP" "$OUT/notary-app.zip"
+  notarize "$OUT/notary-app.zip"
+  xcrun stapler staple "$APP"
+  xcrun stapler validate "$APP"
+  spctl -a -vvv "$APP"
+  rm "$OUT/notary-app.zip" "$OUT/notary-result.json"
+fi
 python3 -I tools/third-party-licenses.py "$STAGE/Licenses/THIRD-PARTY-LICENSES.txt" aarch64-apple-darwin x86_64-apple-darwin
 cp README.md NOTICE LICENSE-MIT LICENSE-APACHE "$STAGE/Licenses/"
 cp -r LICENSES/. "$STAGE/Licenses/"
@@ -40,8 +64,10 @@ hdiutil create -volname "Tailgate $VERSION" -srcfolder "$STAGE" -fs HFS+ -format
 if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
   codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$OUT/$NAME.dmg"
   if [ -n "${NOTARY_PROFILE:-}" ]; then
-    xcrun notarytool submit "$OUT/$NAME.dmg" --keychain-profile "$NOTARY_PROFILE" ${NOTARY_KEYCHAIN:+--keychain "$NOTARY_KEYCHAIN"} --wait
+    notarize "$OUT/$NAME.dmg"
+    rm "$OUT/notary-result.json"
     xcrun stapler staple "$OUT/$NAME.dmg"
+    xcrun stapler validate "$OUT/$NAME.dmg"
     spctl --assess --type open --context context:primary-signature --verbose=2 "$OUT/$NAME.dmg"
   fi
 fi

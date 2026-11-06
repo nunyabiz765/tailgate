@@ -11,9 +11,10 @@ else
 fi
 share="$HOME/.local/share"
 install -Dm755 "$bin" "$HOME/.local/bin/tailgate"
-install -Dm644 assets/tailgate.svg "$share/icons/hicolor/scalable/apps/tailgate.svg"
-install -Dm644 assets/tailgate-256.png "$share/icons/hicolor/256x256/apps/tailgate.png"
-install -Dm644 assets/tailgate-64.png "$share/icons/hicolor/64x64/apps/tailgate.png"
+for s in 48 64 128 256 512; do
+    install -Dm644 "assets/icons/tailgate-$s.png" "$share/icons/hicolor/${s}x${s}/apps/tailgate.png"
+done
+rm -f "$share/icons/hicolor/scalable/apps/tailgate.svg"   # the old icon, from 0.2.0 and earlier
 mkdir -p "$share/applications"
 sed "s|@BIN@|$HOME/.local/bin/tailgate|" assets/tailgate.desktop > "$share/applications/tailgate.desktop"
 command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 >/dev/null 2>&1 || true
