@@ -34,6 +34,11 @@
   </keywords>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.2" date="2026-11-06">
+      <description>
+        <p>Notarized, stapled macOS build and the fawn icon. Same app as 0.2.1 otherwise.</p>
+      </description>
+    </release>
     <release version="0.2.1" date="2026-11-06">
       <description>
         <p>A .deb package for Ubuntu, Zorin OS, Linux Mint and Pop!_OS, and a setup guide inside the app when Tailscale isn't installed or signed in yet, and a new icon.</p>
