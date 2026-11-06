@@ -70,7 +70,8 @@ net)
     fi
     if [ "$1" = '*' ]; then
       [ "$mode" = needs-password ] && { printf 'System error 1326 has occurred.\r\n\r\nThe user name or password is incorrect.\r\n' >&2; exit 2; }
-      echo "OK           Z:        $2     Microsoft Windows Network" >> "$state"
+      # printf, not echo: dash and macOS sh turn the backslashes in \\host\share into escapes.
+      printf 'OK           Z:        %s     Microsoft Windows Network\n' "$2" >> "$state"
       printf 'Drive Z: is now connected to %s.\r\n\r\nThe command completed successfully.\r\n' "$2"; exit 0
     fi
     if [ "$2" = /delete ]; then drop " $1 "; printf '%s was deleted successfully.\r\n' "$1"; exit 0; fi ;;
