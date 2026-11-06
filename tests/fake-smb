@@ -1,0 +1,78 @@
+#!/bin/sh
+# Stands in for the programs the Shares tab runs (gio, smbclient, open, mount,
+# diskutil, net, explorer, xdg-open) plus a "probe" for port 445, so tests and
+# screenshots never touch a real network or mount anything.
+#
+# usage: fake-smb NAME [ARGS...]   (the tests make one wrapper per NAME)
+# env:   FAKE_SMB_LOG    file that gets one line per call: NAME<TAB>ARGS
+#        FAKE_SMB_STATE  file holding what's "mounted"
+#        FAKE_SMB_HOSTS  hosts that answer on port 445 (space-separated)
+#        FAKE_SMB_LIST   hosts that list their shares to anyone
+#        FAKE_SMB_SHARES share names those hosts list (space-separated)
+#        FAKE_SMB_MODE   ok (default), needs-password, unsupported, slow
+name=$1; shift
+state=${FAKE_SMB_STATE:-/tmp/fake-smb-state}
+touch "$state"
+if [ -n "$FAKE_SMB_LOG" ]; then
+  (IFS='	'; printf '%s\t%s\n' "$name" "$*") >> "$FAKE_SMB_LOG"
+fi
+mode=${FAKE_SMB_MODE:-ok}
+has() { case " $1 " in *" $2 "*) return 0;; esac; return 1; }
+drop() { grep -vF -- "$1" "$state" > "$state.tmp"; mv "$state.tmp" "$state"; }
+[ "$mode" = slow ] && sleep 3
+
+case "$name" in
+probe)
+  has "$FAKE_SMB_HOSTS" "$1" && exit 0; exit 1 ;;
+smbclient)
+  host=${2#//}
+  if has "$FAKE_SMB_LIST" "$host"; then
+    for s in $FAKE_SMB_SHARES; do echo "Disk|$s|"; done
+    echo "IPC|IPC$|IPC Service"; exit 0
+  fi
+  echo "tree connect failed: NT_STATUS_ACCESS_DENIED" >&2; exit 1 ;;
+gio)
+  case "$1 $2" in
+  "list "*) echo "gio: $2: Permission denied" >&2; exit 1 ;;
+  "mount -l") grep '^Mount' "$state"; exit 0 ;;
+  "mount -u") drop " -> $3/"; exit 0 ;;
+  "mount "*)
+    case "$mode" in
+    needs-password) echo "Password required for share on server"; echo "gio: $2: Invalid argument" >&2; exit 2 ;;
+    unsupported) echo "gio: $2: The specified location is not supported" >&2; exit 2 ;;
+    esac
+    rest=${2#smb://}; host=${rest%%/*}; host=${host#*@}; share=${rest#*/}
+    echo "Mount(0): $share on $host -> $2/" >> "$state"; exit 0 ;;
+  esac ;;
+open)
+  if [ "$1" = -g ]; then
+    rest=${2#smb://}; auth=${rest%%/*}; share=${rest#*/}
+    echo "//$auth/$share on /Volumes/$share (smbfs, nodev, nosuid, mounted by pat)" >> "$state"
+  fi
+  exit 0 ;;
+mount)
+  grep 'smbfs' "$state"; exit 0 ;;
+diskutil)
+  drop " on $2 ("; echo "Volume $2 on disk unmounted"; exit 0 ;;
+net)
+  sub=$1; shift
+  case "$sub" in
+  view) printf 'Shared resources at %s\r\n\r\nShare name  Type  Used as  Comment\r\n\r\n-------------------------------------------------------------------------------\r\n' "$1"
+        for s in $FAKE_SMB_SHARES; do printf '%-12sDisk\r\n' "$s"; done
+        printf 'The command completed successfully.\r\n'; exit 0 ;;
+  use)
+    if [ $# -eq 0 ]; then
+      printf 'New connections will not be remembered.\r\n\r\nStatus       Local     Remote                    Network\r\n\r\n-------------------------------------------------------------------------------\r\n'
+      grep 'Windows Network' "$state"; printf 'The command completed successfully.\r\n'; exit 0
+    fi
+    if [ "$1" = '*' ]; then
+      [ "$mode" = needs-password ] && { printf 'System error 1326 has occurred.\r\n\r\nThe user name or password is incorrect.\r\n' >&2; exit 2; }
+      echo "OK           Z:        $2     Microsoft Windows Network" >> "$state"
+      printf 'Drive Z: is now connected to %s.\r\n\r\nThe command completed successfully.\r\n' "$2"; exit 0
+    fi
+    if [ "$2" = /delete ]; then drop " $1 "; printf '%s was deleted successfully.\r\n' "$1"; exit 0; fi ;;
+  esac ;;
+xdg-open|explorer) exit 0 ;;
+esac
+echo "fake-smb: unexpected $name $*" >&2
+exit 64

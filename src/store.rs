@@ -2,7 +2,8 @@
 //! `~/.config/tailgate/state.json` (Linux; %APPDATA%\Tailgate on Windows,
 //! ~/Library/Application Support/Tailgate on macOS). Node names only, no secrets.
 //! Optional names for served ports come from `labels.json` beside it, which
-//! Tailgate only reads.
+//! Tailgate only reads. File shares are saved as host, share name and user name;
+//! their passwords stay in the OS keychain.
 
 use crate::nodes::Favorite;
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,29 @@ pub struct Saved {
     pub last_used: Option<LastUsed>,
     pub all_servers: bool,
     pub dark: bool,
+    /// File shares that were added by hand or set to connect at login.
+    pub shares: Vec<SavedShare>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedShare {
+    /// Tailscale IP or name.
+    pub host: String,
+    pub share: String,
+    /// Empty: the OS's default user.
+    #[serde(default)]
+    pub user: String,
+    /// The device's name, for showing while it's offline.
+    #[serde(default)]
+    pub device: String,
+    #[serde(default)]
+    pub at_login: bool,
+}
+
+impl SavedShare {
+    pub fn key(&self) -> String {
+        crate::shares::share_key(&self.host, &self.share)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,6 +65,24 @@ impl Saved {
         } else {
             self.favorites.push(SavedFavorite { id: id.into(), label: label.into() });
         }
+    }
+
+    pub fn share(&self, key: &str) -> Option<&SavedShare> {
+        self.shares.iter().find(|s| s.key() == key)
+    }
+
+    /// Adds the share, or updates the one with the same host and name.
+    pub fn upsert_share(&mut self, share: SavedShare) {
+        match self.shares.iter_mut().find(|s| s.key() == share.key()) {
+            Some(existing) => *existing = share,
+            None => self.shares.push(share),
+        }
+    }
+
+    pub fn forget_share(&mut self, key: &str) -> bool {
+        let before = self.shares.len();
+        self.shares.retain(|s| s.key() != key);
+        self.shares.len() != before
     }
 
     /// True if this changed anything, so callers only write when they must.
@@ -153,6 +195,30 @@ mod tests {
         assert_eq!(load_labels(&path).get(&8443).map(String::as_str), Some("Dashboard"));
         std::fs::write(&path, "{ not json").unwrap();
         assert!(load_labels(&path).is_empty());
+    }
+
+    #[test]
+    fn shares_round_trip_without_secrets() {
+        let path = temp_path("shares");
+        let mut saved = Saved::default();
+        let share = SavedShare { host: "100.64.0.1".into(), share: "Home".into(), user: "pat".into(), device: "nas".into(), at_login: true };
+        saved.upsert_share(share.clone());
+        saved.upsert_share(SavedShare { host: "100.64.0.1".into(), share: "home".into(), at_login: false, ..share.clone() });
+        assert_eq!(saved.shares.len(), 1, "same host and share, any case, is one share");
+        assert!(!saved.shares[0].at_login);
+        saved.upsert_share(share.clone());
+        save(&path, &saved).unwrap();
+        assert_eq!(load(&path), saved);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.to_lowercase().contains("pass"), "{text}");
+        assert!(saved.share("100.64.0.1/home").is_some_and(|s| s.at_login));
+        assert!(saved.forget_share("100.64.0.1/home"));
+        assert!(!saved.forget_share("100.64.0.1/home"));
+        // Older state.json files without shares still load.
+        let old: Saved = serde_json::from_str(r#"{"dark":true}"#).unwrap();
+        assert!(old.shares.is_empty());
+        let partial: Saved = serde_json::from_str(r#"{"shares":[{"host":"h","share":"s"}]}"#).unwrap();
+        assert_eq!(partial.shares[0].user, "");
     }
 
     #[test]

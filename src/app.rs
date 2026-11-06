@@ -5,7 +5,7 @@
 //! ever delay an update, never freeze the window.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,18 +16,22 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
+use tailgate::autostart;
 use tailgate::cli::{self, Action, CliError, Client, Query};
 use tailgate::ipcheck;
 use tailgate::nodes;
+use tailgate::shares::{self, Mounted, MountKind, Outcome, Reconnect, ShareRef, Tools, Want};
 use tailgate::status::{self, Backend, Peer, Prefs, ServeEntry, Status};
-use tailgate::store::{self, Saved};
+use tailgate::store::{self, Saved, SavedShare};
 use tailgate::summary;
 
-use crate::{App as AppGlobal, AppWindow, DeviceRow, NodeRow, ServeRow, Theme};
+use crate::{App as AppGlobal, AppWindow, DeviceRow, NodeRow, ServeRow, ShareRow, Theme};
 
 const POLL_EVERY: Duration = Duration::from_secs(4);
 const SERVE_EVERY: Duration = Duration::from_secs(30);
 const NOTICE_FADE: Duration = Duration::from_secs(7);
+/// How long "Waiting for Finder" shows before Tailgate stops expecting the mount.
+const FINDER_WAIT: Duration = Duration::from_secs(90);
 const ADMIN_URL: &str = "https://login.tailscale.com/admin/machines";
 const SOURCE_URL: &str = "https://github.com/nunyabiz765/tailgate";
 
@@ -50,6 +54,7 @@ struct PollResult {
     status: Result<Status, CliError>,
     prefs: Result<Prefs, CliError>,
     serve: Option<ServeResult>,
+    mounted: Vec<Mounted>,
 }
 
 struct ServeResult {
@@ -81,16 +86,39 @@ struct State {
     setup: i32,
     /// "Sign in" was clicked, so open the login page as soon as Tailscale offers one.
     login_requested: bool,
+    shares: SharesView,
+}
+
+/// What the Shares tab knows beyond the saved shares.
+#[derive(Default)]
+struct SharesView {
+    found: Vec<shares::Found>,
+    scanning: bool,
+    scanned: bool,
+    mounted: Vec<Mounted>,
+    /// Connects and disconnects in flight.
+    working: BTreeSet<String>,
+    /// Handed to Finder, which mounts on its own time.
+    requested: BTreeMap<String, Instant>,
+    /// The last thing worth saying about a share: (row state, text).
+    notes: BTreeMap<String, (i32, String)>,
+    reconnect: Reconnect,
+    was_running: Option<bool>,
+    online: BTreeMap<String, bool>,
+    last_poll: Option<(SystemTime, Instant)>,
+    launch_at_login: bool,
 }
 
 struct Controller {
     ui: slint::Weak<AppWindow>,
     client: Client,
+    tools: Tools,
     state_path: PathBuf,
     state: RefCell<State>,
     nodes: Rc<VecModel<NodeRow>>,
     devices: Rc<VecModel<DeviceRow>>,
     serve_rows: Rc<VecModel<ServeRow>>,
+    share_rows: Rc<VecModel<ShareRow>>,
     notice_timer: slint::Timer,
     /// Wakes the poller early. The value asks it to refresh serve status too.
     poll: Sender<bool>,
@@ -153,7 +181,8 @@ impl Controller {
     /// Keyboard focus can Tab out of a dialog, so check before acting behind one.
     fn modal_open(&self) -> bool {
         let state = self.state.borrow();
-        state.confirm.is_some() || state.permission.is_some()
+        let add_share = self.ui().is_some_and(|ui| ui.global::<AppGlobal>().get_add_share_open());
+        state.confirm.is_some() || state.permission.is_some() || add_share
     }
 
     fn wake_poll(&self, with_serve: bool) {
@@ -219,6 +248,7 @@ impl Controller {
         if let Some(url) = login_url {
             self.open(&url);
         }
+        self.after_poll_shares(result.mounted);
         self.render();
     }
 
@@ -423,6 +453,558 @@ impl Controller {
         }
     }
 
+    // ---- file shares ----
+
+    fn shares_tab(&self) -> i32 {
+        self.ui().map_or(3, |ui| if ui.global::<AppGlobal>().get_narrow() { 4 } else { 3 })
+    }
+
+    /// Every name a share's host goes by on the tailnet, so a mount made with
+    /// the IP matches a share saved by name and the other way round.
+    fn host_aliases(&self, host: &str) -> Vec<String> {
+        let state = self.state.borrow();
+        let mut out = vec![host.to_string()];
+        if let Some(peer) = state.status.as_ref().and_then(|s| peer_for(s, host)) {
+            out.extend(peer.ips.iter().cloned());
+            out.push(peer.host.clone());
+            out.push(peer.fqdn().to_string());
+            out.push(peer.display_name());
+        }
+        out
+    }
+
+    fn mounted_for(&self, key: &str) -> Option<Mounted> {
+        let (host, share) = self.share_parts(key)?;
+        let aliases = self.host_aliases(&host);
+        self.state.borrow().shares.mounted.iter().find(|m| m.is(&share, &aliases)).cloned()
+    }
+
+    /// Host and share name for a key, from the saved shares, the scan or the mounts.
+    fn share_parts(&self, key: &str) -> Option<(String, String)> {
+        let state = self.state.borrow();
+        if let Some(s) = state.saved.share(key) {
+            return Some((s.host.clone(), s.share.clone()));
+        }
+        for f in &state.shares.found {
+            for name in f.shares.iter().flatten() {
+                if shares::share_key(&f.host, name) == key {
+                    return Some((f.host.clone(), name.clone()));
+                }
+            }
+        }
+        state
+            .shares
+            .mounted
+            .iter()
+            .find(|m| shares::share_key(&m.host, &m.share) == key)
+            .map(|m| (m.host.clone(), m.share.clone()))
+    }
+
+    fn share_ref(&self, key: &str) -> Option<ShareRef> {
+        let user = self.state.borrow().saved.share(key).map(|s| s.user.clone()).unwrap_or_default();
+        let (host, share) = self.share_parts(key)?;
+        ShareRef::new(&host, &share, &user).ok()
+    }
+
+    fn device_name(&self, host: &str) -> String {
+        let state = self.state.borrow();
+        if let Some(peer) = state.status.as_ref().and_then(|s| peer_for(s, host)) {
+            return peer.display_name();
+        }
+        state
+            .saved
+            .shares
+            .iter()
+            .find(|s| s.host.eq_ignore_ascii_case(host) && !s.device.is_empty())
+            .map(|s| s.device.clone())
+            .or_else(|| state.shares.found.iter().find(|f| f.host.eq_ignore_ascii_case(host)).map(|f| f.name.clone()))
+            .unwrap_or_else(|| host.to_string())
+    }
+
+    fn scan_shares(self: &Rc<Self>) {
+        let candidates: Vec<shares::Candidate> = {
+            let mut state = self.state.borrow_mut();
+            if state.shares.scanning {
+                return;
+            }
+            let Some(status) = state.status.as_ref() else { return };
+            let list = status
+                .peers
+                .iter()
+                .filter(|p| p.online && !p.mullvad)
+                .filter_map(|p| Some(shares::Candidate { host: p.ipv4()?.to_string(), name: p.display_name() }))
+                .collect();
+            state.shares.scanning = true;
+            list
+        };
+        self.render();
+        let tools = self.tools.clone();
+        thread::spawn(move || {
+            let mut found = shares::scan(&tools, &candidates);
+            found.sort_by_key(|f| f.name.to_lowercase());
+            post(move |c| {
+                {
+                    let mut state = c.state.borrow_mut();
+                    state.shares.found = found;
+                    state.shares.scanning = false;
+                    state.shares.scanned = true;
+                }
+                c.render();
+            });
+        });
+    }
+
+    /// Connects a share; `ask` when the user clicked, so the OS may prompt.
+    fn connect_share(self: &Rc<Self>, key: &str, ask: bool) {
+        let Some(share) = self.share_ref(key) else {
+            self.notify(2, "That share isn't in the list any more.");
+            return;
+        };
+        {
+            let mut state = self.state.borrow_mut();
+            if !state.shares.working.insert(key.to_string()) {
+                return;
+            }
+            if ask {
+                state.shares.reconnect.release(key);
+            }
+            state.shares.notes.remove(key);
+        }
+        self.render();
+        let tools = self.tools.clone();
+        let key = key.to_string();
+        thread::spawn(move || {
+            let result = shares::connect(&tools, &share, ask);
+            post(move |c| c.on_share_connected(key, share, ask, result));
+        });
+    }
+
+    fn on_share_connected(self: &Rc<Self>, key: String, share: ShareRef, ask: bool, result: shares::Connected) {
+        let os = self.tools.os;
+        let name = share.share.clone();
+        {
+            let mut state = self.state.borrow_mut();
+            let view = &mut state.shares;
+            view.working.remove(&key);
+            match &result.outcome {
+                Outcome::Connected(_) => {
+                    view.reconnect.succeeded(&key);
+                }
+                Outcome::Requested => {
+                    view.requested.insert(key.clone(), Instant::now());
+                }
+                Outcome::NeedsSignIn(_) => {
+                    view.reconnect.hold(&key, "sign-in");
+                    let text = if result.handed_off {
+                        format!("Sign in where {} asks, and tick Remember.", os.file_manager())
+                    } else {
+                        "Needs a sign-in. Click Connect.".to_string()
+                    };
+                    view.notes.insert(key.clone(), (3, text));
+                }
+                Outcome::Unsupported(_) => {
+                    view.reconnect.hold(&key, "unsupported");
+                    view.notes.insert(
+                        key.clone(),
+                        (4, "This system can't mount SMB shares; install gvfs-smb (gvfs-backends on Ubuntu).".to_string()),
+                    );
+                }
+                Outcome::Failed(msg) => {
+                    view.notes.insert(key.clone(), (4, msg.clone()));
+                }
+            }
+        }
+        if ask {
+            match &result.outcome {
+                Outcome::Connected(drive) if !drive.is_empty() => self.notify(1, format!("Connected {name} as {drive}.")),
+                Outcome::Connected(_) => self.notify(1, format!("Connected {name}.")),
+                Outcome::Requested => self.notify(
+                    1,
+                    format!("Asked Finder to connect {name}. If it asks for a password, tick Remember in Keychain."),
+                ),
+                Outcome::NeedsSignIn(_) if result.handed_off => self.notify(
+                    1,
+                    format!(
+                        "{} has no saved sign-in for {name}, so {} is asking for one. Tick Remember, so Tailgate can reconnect it by itself next time.",
+                        capitalize(os.keychain()),
+                        os.file_manager()
+                    ),
+                ),
+                Outcome::NeedsSignIn(msg) => self.notify(2, format!("{name} needs a sign-in, and {} didn't open: {msg}", os.file_manager())),
+                Outcome::Unsupported(msg) if result.handed_off => self.notify(
+                    2,
+                    format!("Opened {name} in your file manager. Tailgate can't keep it connected here ({msg}); installing gvfs-smb fixes that."),
+                ),
+                Outcome::Unsupported(msg) => self.notify(2, format!("Couldn't connect {name}: {msg}")),
+                Outcome::Failed(msg) => self.notify(2, format!("Couldn't connect {name}. {msg}")),
+            }
+        }
+        self.render();
+        self.wake_poll(false);
+    }
+
+    fn disconnect_share(self: &Rc<Self>, key: &str) {
+        let Some(mounted) = self.mounted_for(key) else { return };
+        let name = self.share_parts(key).map_or_else(|| mounted.share.clone(), |(_, share)| share);
+        if !self.state.borrow_mut().shares.working.insert(key.to_string()) {
+            return;
+        }
+        self.render();
+        let tools = self.tools.clone();
+        let key = key.to_string();
+        thread::spawn(move || {
+            let result = shares::disconnect(&tools, &mounted);
+            post(move |c| {
+                {
+                    let mut state = c.state.borrow_mut();
+                    state.shares.working.remove(&key);
+                    if result.is_ok() {
+                        // Disconnected on purpose, so don't put it back by itself.
+                        state.shares.reconnect.hold(&key, "disconnected");
+                        state.shares.notes.remove(&key);
+                    }
+                }
+                match result {
+                    Ok(()) => c.notify(1, format!("Disconnected {name}. It stays disconnected until you click Connect.")),
+                    Err(e) => c.notify(2, format!("Couldn't disconnect {name}. {e}")),
+                }
+                c.render();
+                c.wake_poll(false);
+            });
+        });
+    }
+
+    fn open_share(self: &Rc<Self>, key: &str) {
+        let Some(mounted) = self.mounted_for(key) else { return };
+        let tools = self.tools.clone();
+        thread::spawn(move || {
+            if let Err(e) = shares::open(&tools, &mounted) {
+                post(move |c| c.notify(2, format!("Couldn't open {}. {e}", mounted.share)));
+            }
+        });
+    }
+
+    fn toggle_share_login(self: &Rc<Self>, key: &str) {
+        let existing = self.state.borrow().saved.share(key).cloned();
+        let share = match existing {
+            Some(mut s) => {
+                s.at_login = !s.at_login;
+                s
+            }
+            None => {
+                let Some((host, share)) = self.share_parts(key) else { return };
+                SavedShare { device: self.device_name(&host), host, share, user: String::new(), at_login: true }
+            }
+        };
+        let on = share.at_login;
+        let name = share.share.clone();
+        self.state.borrow_mut().saved.upsert_share(share);
+        self.save();
+        let launch = self.state.borrow().shares.launch_at_login;
+        if on && !launch {
+            self.notify(1, format!("{name} will connect when Tailgate starts. Turn on Open Tailgate at login to have that happen when you sign in."));
+        }
+        self.render();
+    }
+
+    fn forget_share(self: &Rc<Self>, key: &str) {
+        let removed = self.state.borrow_mut().saved.forget_share(key);
+        if removed {
+            self.state.borrow_mut().shares.notes.remove(key);
+            self.save();
+            self.render();
+        }
+    }
+
+    fn add_share_submit(self: &Rc<Self>) {
+        let Some(ui) = self.ui() else { return };
+        let app = ui.global::<AppGlobal>();
+        let share = match ShareRef::new(&app.get_add_share_host(), &app.get_add_share_name(), &app.get_add_share_user()) {
+            Ok(share) => share,
+            Err(e) => {
+                app.set_add_share_error(e.into());
+                return;
+            }
+        };
+        let device = self.device_name(&share.host);
+        let at_login = self.state.borrow().saved.share(&share.key()).is_some_and(|s| s.at_login);
+        self.state.borrow_mut().saved.upsert_share(SavedShare {
+            host: share.host.clone(),
+            share: share.share.clone(),
+            user: share.user.clone(),
+            device,
+            at_login,
+        });
+        self.save();
+        app.set_add_share_open(false);
+        app.set_add_share_error("".into());
+        self.notify(1, format!("Added {}. Click Connect to use it.", share.share));
+        self.render();
+    }
+
+    fn toggle_launch_at_login(self: &Rc<Self>) {
+        if self.client.read_only {
+            self.notify(1, "Read-only mode: didn't change the login items.");
+            return;
+        }
+        let want = !autostart::is_enabled();
+        match autostart::set_enabled(want) {
+            Ok(()) => self.notify(
+                1,
+                if want { "Tailgate will open, minimized, when you sign in." } else { "Tailgate won't open at login any more." },
+            ),
+            Err(e) => self.notify(2, format!("Couldn't change that. {e}")),
+        }
+        self.state.borrow_mut().shares.launch_at_login = autostart::is_enabled();
+        self.render();
+    }
+
+    /// Notices Tailscale coming back, sleep and hosts returning, and retries
+    /// "Connect at login" shares as the scheduler says.
+    fn after_poll_shares(self: &Rc<Self>, mounted: Vec<Mounted>) {
+        let now = Instant::now();
+        let wall = SystemTime::now();
+        let at_login: Vec<SavedShare> = self.state.borrow().saved.shares.iter().filter(|s| s.at_login).cloned().collect();
+        // Aliases need the state borrow, so work them out first.
+        let aliases: Vec<Vec<String>> = at_login.iter().map(|s| self.host_aliases(&s.host)).collect();
+        let due = {
+            let mut guard = self.state.borrow_mut();
+            let state = &mut *guard;
+            let running = matches!(state.status.as_ref().map(|s| &s.backend), Some(Backend::Running));
+            let view = &mut state.shares;
+            view.mounted = mounted;
+            let keys: Vec<String> = at_login.iter().map(SavedShare::key).collect();
+
+            // Tailgate starting with Tailscale up counts as coming back too.
+            let came_back = running && view.was_running != Some(true);
+            let woke = view.last_poll.is_some_and(|(w, m)| {
+                shares::slept(wall.duration_since(w).unwrap_or_default(), now.duration_since(m))
+            });
+            if came_back || woke {
+                view.reconnect.trigger(now, keys.iter().map(String::as_str));
+            }
+            view.was_running = Some(running);
+            view.last_poll = Some((wall, now));
+
+            let mut wants = Vec::new();
+            for (i, share) in at_login.iter().enumerate() {
+                let peer = state.status.as_ref().and_then(|s| peer_for(s, &share.host));
+                let online = peer.map(|p| p.online);
+                let key = &keys[i];
+                if let Some(online) = online {
+                    if online && view.online.get(key) == Some(&false) {
+                        view.reconnect.trigger(now, [key.as_str()]);
+                    }
+                    view.online.insert(key.clone(), online);
+                }
+                let connected = view.mounted.iter().any(|m| m.is(&share.share, &aliases[i]));
+                if connected {
+                    view.requested.remove(key);
+                }
+                let busy = view.working.contains(key) || view.requested.contains_key(key);
+                wants.push((key.clone(), connected || busy, running && online.unwrap_or(true)));
+            }
+            let wants: Vec<Want> =
+                wants.iter().map(|(key, connected, reachable)| Want { key, connected: *connected, reachable: *reachable }).collect();
+            let due = view.reconnect.due(now, &wants);
+
+            // Finder never mounted it: stop saying it's on its way.
+            let stale: Vec<String> =
+                view.requested.iter().filter(|(_, at)| now.duration_since(**at) > FINDER_WAIT).map(|(k, _)| k.clone()).collect();
+            for key in stale {
+                view.requested.remove(&key);
+                view.notes.insert(key, (0, "Not connected. If Finder asked for a password, finish there.".into()));
+            }
+            // Mounted shares need no notes.
+            let mounted_keys: Vec<String> =
+                view.notes.keys().filter(|k| view.mounted.iter().any(|m| shares::share_key(&m.host, &m.share) == **k)).cloned().collect();
+            for key in mounted_keys {
+                view.notes.remove(&key);
+            }
+            due
+        };
+        for key in due {
+            self.connect_share(&key, false);
+        }
+    }
+
+    fn render_shares(&self, app: &crate::App) {
+        let state = self.state.borrow();
+        let status = state.status.as_ref();
+        let view = &state.shares;
+        let os = self.tools.os;
+        let running = matches!(status.map(|s| &s.backend), Some(Backend::Running));
+
+        // Devices to show: scanned, saved, or holding a connected share.
+        struct Device {
+            name: String,
+            host: String,
+            online: Option<bool>,
+            listed: Option<bool>,
+            shares: Vec<(String, String)>,
+        }
+        let mut devices: BTreeMap<String, Device> = BTreeMap::new();
+        let device_key = |host: &str| -> String {
+            match status.and_then(|s| peer_for(s, host)) {
+                Some(p) => p.id.clone(),
+                None => host.to_lowercase(),
+            }
+        };
+        let mut add = |host: &str, name: &str, share: Option<&str>, listed: Option<bool>| {
+            let peer = status.and_then(|s| peer_for(s, host));
+            let entry = devices.entry(device_key(host)).or_insert_with(|| Device {
+                name: peer.map(|p| p.display_name()).unwrap_or_else(|| if name.is_empty() { host.to_string() } else { name.to_string() }),
+                host: peer.and_then(|p| p.ipv4().map(String::from)).unwrap_or_else(|| host.to_string()),
+                online: peer.map(|p| p.online),
+                listed: None,
+                shares: Vec::new(),
+            });
+            if listed.is_some() {
+                entry.listed = listed;
+            }
+            if let Some(share) = share {
+                let key = shares::share_key(host, share);
+                let same = |(k, s): &(String, String)| *k == key || s.eq_ignore_ascii_case(share);
+                if !entry.shares.iter().any(same) {
+                    entry.shares.push((key, share.to_string()));
+                }
+            }
+        };
+        for s in &state.saved.shares {
+            add(&s.host, &s.device, Some(&s.share), None);
+        }
+        for f in &view.found {
+            add(&f.host, &f.name, None, Some(f.shares.is_some()));
+            for share in f.shares.iter().flatten() {
+                add(&f.host, &f.name, Some(share), None);
+            }
+        }
+        // Shares connected some other way (Finder, a login script) on tailnet devices.
+        for m in &view.mounted {
+            if status.and_then(|s| peer_for(s, &m.host)).is_some() {
+                add(&m.host, "", Some(&m.share), None);
+            }
+        }
+
+        let mut list: Vec<Device> = devices.into_values().collect();
+        list.sort_by_key(|d| (d.online == Some(false), d.name.to_lowercase()));
+        let mut rows = Vec::new();
+        for mut d in list {
+            d.shares.sort_by_key(|(_, s)| s.to_lowercase());
+            let mut detail = d.host.clone();
+            if d.online == Some(false) {
+                detail.push_str(" · offline");
+            }
+            rows.push(ShareRow { kind: 0, title: d.name.clone().into(), detail: detail.into(), host: d.host.clone().into(), ..ShareRow::default() });
+            if d.shares.is_empty() && d.listed == Some(false) {
+                rows.push(ShareRow {
+                    kind: 2,
+                    detail: "File sharing answers here, but its share names need a sign-in to list. Add one by name.".into(),
+                    ..ShareRow::default()
+                });
+            }
+            for (key, share) in d.shares {
+                let saved = state.saved.share(&key);
+                let aliases = {
+                    let mut a = vec![d.host.clone()];
+                    if let Some(p) = status.and_then(|s| peer_for(s, &d.host)) {
+                        a.extend(p.ips.iter().cloned());
+                        a.push(p.host.clone());
+                        a.push(p.fqdn().to_string());
+                        a.push(p.display_name());
+                    }
+                    if let Some(s) = saved {
+                        a.push(s.host.clone());
+                    }
+                    a
+                };
+                let mounted = view.mounted.iter().find(|m| m.is(&share, &aliases));
+                let at_login = saved.is_some_and(|s| s.at_login);
+                let discovered = view.found.iter().any(|f| f.shares.iter().flatten().any(|n| shares::share_key(&f.host, n) == key));
+                let (state_code, text) = if view.working.contains(&key) {
+                    (2, if mounted.is_some() { "Disconnecting…".to_string() } else { "Connecting…".to_string() })
+                } else if let Some(m) = mounted {
+                    (1, connected_text(os, m))
+                } else if view.requested.contains_key(&key) {
+                    (2, "Waiting for Finder…".to_string())
+                } else if d.online == Some(false) {
+                    (5, if at_login { "Device offline · reconnects when it's back".into() } else { "Device offline".into() })
+                } else if let Some((code, note)) = view.notes.get(&key) {
+                    (*code, note.clone())
+                } else if at_login && !running {
+                    (0, "Not connected · reconnects when Tailscale is back".into())
+                } else if at_login && view.reconnect.gave_up(&key) {
+                    (0, "Couldn't reconnect. Tries again when Tailscale reconnects.".into())
+                } else if at_login && view.reconnect.active(&key) {
+                    (0, "Reconnecting…".into())
+                } else {
+                    (0, "Not connected".into())
+                };
+                let user = saved.map(|s| s.user.as_str()).unwrap_or("");
+                let title = if user.is_empty() { share.clone() } else { format!("{share}  ·  as {user}") };
+                rows.push(ShareRow {
+                    kind: 1,
+                    key: key.clone().into(),
+                    title: title.into(),
+                    detail: text.into(),
+                    host: d.host.clone().into(),
+                    state: state_code,
+                    at_login,
+                    can_disconnect: mounted.is_some_and(|m| m.kind != MountKind::Cifs),
+                    can_forget: saved.is_some() && !discovered && mounted.is_none(),
+                });
+            }
+        }
+
+        let online = status.map_or(0, |s| s.peers.iter().filter(|p| p.online && !p.mullvad).count());
+        app.set_shares_scanning(view.scanning);
+        app.set_shares_summary(
+            if view.scanning {
+                format!("Looking for file shares on {online} online devices…")
+            } else if view.scanned {
+                let with = view.found.len();
+                format!("File sharing on {with} of {online} online devices")
+            } else {
+                String::new()
+            }
+            .into(),
+        );
+        app.set_shares_empty(
+            if !rows.is_empty() {
+                String::new()
+            } else if status.is_none() {
+                "No list until Tailscale answers.".into()
+            } else if view.scanning {
+                "Looking for file shares…".into()
+            } else if view.scanned {
+                "No device on your tailnet answers on the file-sharing port (445). If you know a share's name, add it.".into()
+            } else {
+                "Press Scan again to look for file shares on your devices.".into()
+            }
+            .into(),
+        );
+        app.set_shares_footer(
+            format!(
+                "Tailgate never sees your passwords: connecting uses the sign-ins saved in {}. Shares marked At login connect when Tailgate starts and again after sleep or when Tailscale reconnects.",
+                os.keychain()
+            )
+            .into(),
+        );
+        app.set_launch_at_login(view.launch_at_login);
+        let any_at_login = state.saved.shares.iter().any(|s| s.at_login);
+        app.set_launch_at_login_hint(
+            if view.launch_at_login {
+                "Opens minimized when you sign in, and connects the shares marked At login."
+            } else if any_at_login {
+                "Turn on so the shares marked At login connect when you sign in."
+            } else {
+                "Opens minimized when you sign in to this computer."
+            }
+            .into(),
+        );
+        set_model(&self.share_rows, rows);
+    }
+
     // ---- drawing ----
 
     fn render(&self) {
@@ -597,6 +1179,38 @@ impl Controller {
                 .collect(),
         );
         app.set_serve_text(state.serve_text.clone().into());
+        drop(state);
+        self.render_shares(&app);
+    }
+}
+
+/// The tailnet device (or this machine) a host names, by IP or name.
+fn peer_for<'a>(status: &'a Status, host: &str) -> Option<&'a Peer> {
+    let host = host.trim_end_matches('.');
+    std::iter::once(&status.self_peer).chain(status.peers.iter()).find(|p| {
+        p.ips.iter().any(|ip| ip.eq_ignore_ascii_case(host))
+            || (!p.host.is_empty() && p.host.eq_ignore_ascii_case(host))
+            || (!p.dns.is_empty() && p.fqdn().eq_ignore_ascii_case(host))
+            || p.display_name().eq_ignore_ascii_case(host)
+    })
+}
+
+fn connected_text(os: shares::Os, m: &Mounted) -> String {
+    match (os, m.location.as_str()) {
+        (_, "") if os == shares::Os::Windows => "Connected".into(),
+        // gvfs mounts show in the Files/Nautilus sidebar (and under ~/.gvfs-style fuse paths).
+        (_, _) if m.kind == MountKind::Gvfs => "Connected · in your file manager".into(),
+        (_, "") => "Connected".into(),
+        (shares::Os::Windows, drive) => format!("Connected as drive {drive}"),
+        (_, path) => format!("Connected at {path}"),
+    }
+}
+
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
@@ -612,7 +1226,7 @@ fn success_text(action: &Action) -> String {
     }
 }
 
-fn spawn_poller(client: Client, generation: Arc<AtomicU64>, labels: BTreeMap<u32, String>) -> Sender<bool> {
+fn spawn_poller(client: Client, tools: Tools, generation: Arc<AtomicU64>, labels: BTreeMap<u32, String>) -> Sender<bool> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut last_serve: Option<Instant> = None;
@@ -643,7 +1257,10 @@ fn spawn_poller(client: Client, generation: Arc<AtomicU64>, labels: BTreeMap<u32
                     text: client.read(Query::ServeText),
                 }
             });
-            post(move |c| c.on_poll(PollResult { generation: generation_now, status, prefs, serve }));
+            // Cheap (a file read, or one quick command), and it's how a share
+            // dropped by sleep or a network change gets noticed.
+            let mounted = shares::list_mounted(&tools);
+            post(move |c| c.on_poll(PollResult { generation: generation_now, status, prefs, serve, mounted }));
 
             match rx.recv_timeout(POLL_EVERY) {
                 Ok(with_serve) => force_serve |= with_serve,
@@ -656,8 +1273,10 @@ fn spawn_poller(client: Client, generation: Arc<AtomicU64>, labels: BTreeMap<u32
 }
 
 
-pub fn run(read_only: bool) -> Result<(), slint::PlatformError> {
+/// `minimized`: started at login, so stay out of the way.
+pub fn run(read_only: bool, minimized: bool) -> Result<(), slint::PlatformError> {
     let client = Client::from_env(read_only);
+    let tools = Tools::system(read_only);
     let state_path = store::default_path();
     let saved = store::load(&state_path);
 
@@ -669,7 +1288,7 @@ pub fn run(read_only: bool) -> Result<(), slint::PlatformError> {
 
     let generation = Arc::new(AtomicU64::new(0));
     let labels = store::load_labels(&state_path.with_file_name("labels.json"));
-    let poll = spawn_poller(client.clone(), generation.clone(), labels);
+    let poll = spawn_poller(client.clone(), tools.clone(), generation.clone(), labels);
 
     let banner = match (read_only, client.custom_bin) {
         (true, true) => format!("Read-only mode, using a test binary: {}", client.bin.display()),
@@ -689,11 +1308,17 @@ pub fn run(read_only: bool) -> Result<(), slint::PlatformError> {
         ui: ui.as_weak(),
         user: cli::current_user().unwrap_or_default(),
         client,
+        tools,
         state_path,
-        state: RefCell::new(State { saved, ..State::default() }),
+        state: RefCell::new(State {
+            saved,
+            shares: SharesView { launch_at_login: autostart::is_enabled(), ..SharesView::default() },
+            ..State::default()
+        }),
         nodes: Rc::new(VecModel::default()),
         devices: Rc::new(VecModel::default()),
         serve_rows: Rc::new(VecModel::default()),
+        share_rows: Rc::new(VecModel::default()),
         notice_timer: slint::Timer::default(),
         poll,
         generation,
@@ -719,6 +1344,7 @@ pub fn run(read_only: bool) -> Result<(), slint::PlatformError> {
     app.set_nodes(ModelRc::from(controller.nodes.clone()));
     app.set_devices(ModelRc::from(controller.devices.clone()));
     app.set_serve_rows(ModelRc::from(controller.serve_rows.clone()));
+    app.set_share_rows(ModelRc::from(controller.share_rows.clone()));
 
     app.on_switch_node(|id| {
         with(move |c| {
@@ -850,7 +1476,66 @@ pub fn run(read_only: bool) -> Result<(), slint::PlatformError> {
             }
         })
     });
-    app.on_tab_changed(|_| with(|c| c.wake_poll(true)));
+    app.on_tab_changed(|tab| {
+        with(move |c| {
+            c.wake_poll(true);
+            let scanned = c.state.borrow().shares.scanned;
+            if tab == c.shares_tab() && !scanned {
+                c.scan_shares();
+            }
+        })
+    });
+    app.on_scan_shares(|| with(|c| c.scan_shares()));
+    app.on_connect_share(|key| {
+        with(move |c| {
+            if !c.modal_open() {
+                c.connect_share(&key, true);
+            }
+        })
+    });
+    app.on_disconnect_share(|key| {
+        with(move |c| {
+            if !c.modal_open() {
+                c.disconnect_share(&key);
+            }
+        })
+    });
+    app.on_open_share(|key| with(move |c| c.open_share(&key)));
+    app.on_toggle_share_login(|key| with(move |c| c.toggle_share_login(&key)));
+    app.on_forget_share(|key| with(move |c| c.forget_share(&key)));
+    app.on_add_share_for(|host| {
+        with(move |c| {
+            if let Some(ui) = c.ui() {
+                let app = ui.global::<AppGlobal>();
+                app.set_add_share_host(host);
+                app.set_add_share_name("".into());
+                app.set_add_share_user("".into());
+                app.set_add_share_error("".into());
+                app.set_add_share_open(true);
+            }
+        })
+    });
+    app.on_add_share_submit(|| with(|c| c.add_share_submit()));
+    app.on_add_share_cancel(|| {
+        with(|c| {
+            if let Some(ui) = c.ui() {
+                ui.global::<AppGlobal>().set_add_share_open(false);
+            }
+        })
+    });
+    app.on_toggle_launch_at_login(|| with(|c| c.toggle_launch_at_login()));
+
+    // Started at login: minimize once the window exists. Shares marked At
+    // login connect from the first poll that finds Tailscale running.
+    let minimize = slint::Timer::default();
+    if minimized {
+        let weak = ui.as_weak();
+        minimize.start(slint::TimerMode::SingleShot, Duration::from_millis(400), move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.window().set_minimized(true);
+            }
+        });
+    }
 
     controller.render();
     let result = ui.run();

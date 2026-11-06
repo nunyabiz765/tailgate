@@ -1,6 +1,6 @@
 import { AboutSlint, ListView, ScrollView, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Card, Label, Btn, Toggle, Pill, IconButton, SearchBox, TabButton, Scrim, ChoiceCard } from "widgets.slint";
+import { Card, Label, Btn, Toggle, Pill, IconButton, SearchBox, TabButton, Scrim, ChoiceCard, Field } from "widgets.slint";
 
 export { Theme }
 
@@ -30,6 +30,20 @@ export struct ServeRow {
     target: string,
     scope: string,
     public: bool,
+}
+
+export struct ShareRow {
+    // 0 device header, 1 share, 2 note under a device
+    kind: int,
+    key: string,
+    title: string,
+    detail: string,
+    host: string,
+    // 0 not connected, 1 connected, 2 working, 3 needs sign-in, 4 failed, 5 device offline
+    state: int,
+    at-login: bool,
+    can-disconnect: bool,
+    can-forget: bool,
 }
 
 export global App {
@@ -79,6 +93,20 @@ export global App {
     in property <[DeviceRow]> devices;
     in property <[ServeRow]> serve-rows;
     in property <string> serve-text;
+
+    // Shares
+    in property <[ShareRow]> share-rows;
+    in property <bool> shares-scanning;
+    in property <string> shares-summary;
+    in property <string> shares-empty;
+    in property <string> shares-footer;
+    in property <bool> launch-at-login;
+    in property <string> launch-at-login-hint;
+    in-out property <bool> add-share-open: false;
+    in-out property <string> add-share-host;
+    in-out property <string> add-share-name;
+    in-out property <string> add-share-user;
+    in property <string> add-share-error;
 
     // Notice bar: 0 hidden, 1 info, 2 error
     in property <int> notice-kind: 0;
@@ -132,6 +160,16 @@ export global App {
     callback permission-cancel();
     callback toggle-theme();
     callback tab-changed(int);
+    callback scan-shares();
+    callback connect-share(string);
+    callback disconnect-share(string);
+    callback open-share(string);
+    callback toggle-share-login(string);
+    callback forget-share(string);
+    callback add-share-for(string);
+    callback add-share-submit();
+    callback add-share-cancel();
+    callback toggle-launch-at-login();
 }
 
 component SectionTitle inherits Text {
@@ -683,6 +721,281 @@ component ServePane {
     }
 }
 
+component ShareItem {
+    in property <ShareRow> data;
+    height: data.kind == 0 ? 40px : data.kind == 2 ? 52px : 62px;
+
+    if data.kind == 0: HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 14px;
+        padding-top: 8px;
+        spacing: 8px;
+        Text {
+            text: data.title;
+            color: Theme.ink;
+            font-size: 13px;
+            font-weight: 700;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            text: data.detail;
+            color: Theme.soft;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        add := TouchArea {
+            width: add-label.preferred-width + 8px;
+            mouse-cursor: pointer;
+            clicked => { App.add-share-for(data.host); }
+            add-label := Text {
+                text: "+ Add share";
+                color: add.has-hover ? Theme.ink : Theme.accent;
+                font-size: 12px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    if data.kind == 2: Text {
+        x: 26px;
+        width: parent.width - 40px;
+        text: data.detail;
+        color: Theme.soft;
+        font-size: 12px;
+        wrap: word-wrap;
+        vertical-alignment: center;
+    }
+
+    if data.kind == 1: Rectangle {
+        x: 0;
+        y: 2px;
+        height: parent.height - 4px;
+        width: parent.width - 12px;
+        border-radius: 10px;
+        border-width: data.state == 1 ? 1px : 0px;
+        border-color: Theme.good;
+        background: data.state == 1 ? Theme.good-tint : transparent;
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 6px;
+            spacing: 10px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 5px;
+                    background: data.state == 1 ? Theme.good : data.state == 3 || data.state == 2 ? Theme.warn : data.state == 4 ? Theme.bad : Theme.off;
+                }
+            }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 1px;
+                Text {
+                    text: data.title;
+                    color: Theme.ink;
+                    font-size: 14px;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+                Text {
+                    text: data.detail;
+                    color: data.state == 4 ? Theme.bad : data.state == 3 ? Theme.warn : Theme.soft;
+                    font-size: 12px;
+                    overflow: elide;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: "At login";
+                    color: Theme.soft;
+                    font-size: 12px;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                Toggle {
+                    name: "Connect " + data.title + " at login";
+                    on: data.at-login;
+                    toggled => { App.toggle-share-login(data.key); }
+                }
+            }
+            if data.state == 1: VerticalLayout {
+                alignment: center;
+                Btn {
+                    text: "Open";
+                    clicked => { App.open-share(data.key); }
+                }
+            }
+            if data.state == 1 && data.can-disconnect: VerticalLayout {
+                alignment: center;
+                Btn {
+                    text: "Disconnect";
+                    clicked => { App.disconnect-share(data.key); }
+                }
+            }
+            if data.state != 1: VerticalLayout {
+                alignment: center;
+                Btn {
+                    text: data.state == 2 ? "Connecting…" : "Connect";
+                    kind: 1;
+                    enabled: data.state != 2 && data.state != 5;
+                    clicked => { App.connect-share(data.key); }
+                }
+            }
+            if data.can-forget: VerticalLayout {
+                alignment: center;
+                IconButton {
+                    name: "Forget " + data.title;
+                    scale: 0.42;
+                    commands: "M5 5 L19 19 M19 5 L5 19";
+                    clicked => { App.forget-share(data.key); }
+                }
+            }
+        }
+    }
+}
+
+component SharesPane {
+    VerticalLayout {
+        spacing: 10px;
+        padding-right: 10px;
+        SwitchRow {
+            name: "Open Tailgate at login";
+            hint: App.launch-at-login-hint;
+            on: App.launch-at-login;
+            toggled => { App.toggle-launch-at-login(); }
+        }
+        Divider { }
+        HorizontalLayout {
+            spacing: 10px;
+            Label {
+                text: App.shares-summary;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            Btn {
+                text: App.shares-scanning ? "Scanning…" : "Scan again";
+                enabled: !App.shares-scanning;
+                clicked => { App.scan-shares(); }
+            }
+            Btn {
+                text: "Add share";
+                kind: 1;
+                clicked => { App.add-share-for(""); }
+            }
+        }
+        if App.shares-empty != "": Text {
+            vertical-stretch: 1;
+            text: App.shares-empty;
+            color: Theme.soft;
+            font-size: 14px;
+            wrap: word-wrap;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        if App.shares-empty == "": ListView {
+            vertical-stretch: 1;
+            for row in App.share-rows: ShareItem { data: row; }
+        }
+        Text {
+            text: App.shares-footer;
+            color: Theme.soft;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+    }
+}
+
+component AddShareDialog {
+    FocusScope {
+        width: 100%;
+        height: 100%;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                App.add-share-cancel();
+                return accept;
+            }
+            reject
+        }
+        Scrim { width: 100%; height: 100%; VerticalLayout {
+            width: 100%;
+            height: 100%;
+            alignment: center;
+            HorizontalLayout {
+                alignment: center;
+                padding: 18px;
+                Card {
+                    width: min(460px, App.window-width - 36px);
+                    VerticalLayout {
+                        padding: 22px;
+                        spacing: 12px;
+                        Text {
+                            text: "Add a file share";
+                            font-family: Theme.display-font;
+                            font-size: 20px;
+                            font-weight: 600;
+                            color: Theme.ink;
+                        }
+                        Text {
+                            text: "For a share Tailgate didn't find, or one on a device that only lists its shares after you sign in.";
+                            font-size: 13.5px;
+                            color: Theme.soft;
+                            wrap: word-wrap;
+                        }
+                        host := Field {
+                            label: "Device";
+                            placeholder: "Tailscale IP or name, like 100.101.102.103";
+                            text <=> App.add-share-host;
+                            accepted => { App.add-share-submit(); }
+                        }
+                        Field {
+                            label: "Share";
+                            placeholder: "Like Home or Photos";
+                            text <=> App.add-share-name;
+                            accepted => { App.add-share-submit(); }
+                        }
+                        Field {
+                            label: "User name (optional)";
+                            placeholder: "Empty: your computer's usual sign-in";
+                            text <=> App.add-share-user;
+                            accepted => { App.add-share-submit(); }
+                        }
+                        if App.add-share-error != "": Text {
+                            text: App.add-share-error;
+                            color: Theme.bad;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            padding-top: 6px;
+                            spacing: 10px;
+                            alignment: end;
+                            Btn {
+                                text: "Cancel";
+                                clicked => { App.add-share-cancel(); }
+                            }
+                            Btn {
+                                text: "Add share";
+                                kind: 1;
+                                clicked => { App.add-share-submit(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } }
+    init => { host.focus(); }
+}
+
 // A terminal command with a Copy button. TextInput holds the text because it
 // owns the clipboard API in Slint.
 component CommandLine {
@@ -1163,6 +1476,7 @@ export component AppWindow inherits Window {
     property <int> nodes-tab: App.narrow ? 1 : 0;
     property <int> devices-tab: App.narrow ? 2 : 1;
     property <int> serve-tab: App.narrow ? 3 : 2;
+    property <int> shares-tab: App.narrow ? 4 : 3;
 
     changed width => {
         App.window-width = self.width;
@@ -1294,6 +1608,11 @@ export component AppWindow inherits Window {
                                 active: App.tab == serve-tab;
                                 clicked => { App.tab = serve-tab; App.tab-changed(App.tab); }
                             }
+                            TabButton {
+                                text: "Shares";
+                                active: App.tab == shares-tab;
+                                clicked => { App.tab = shares-tab; App.tab-changed(App.tab); }
+                            }
                         }
 
                         if App.setup-step == 0 && App.narrow && App.tab == 0: StatusColumn { vertical-stretch: 1; }
@@ -1304,6 +1623,7 @@ export component AppWindow inherits Window {
                         }
                         if App.setup-step == 0 && App.tab == devices-tab: DevicesPane { vertical-stretch: 1; }
                         if App.setup-step == 0 && App.tab == serve-tab: ServePane { vertical-stretch: 1; }
+                        if App.setup-step == 0 && App.tab == shares-tab: SharesPane { vertical-stretch: 1; }
                     }
                 }
 
@@ -1324,5 +1644,6 @@ export component AppWindow inherits Window {
     if App.confirm-open: ConfirmDialog { x: 0; y: 0; width: 100%; height: 100%; }
     if App.permission-open: PermissionDialog { x: 0; y: 0; width: 100%; height: 100%; }
     if App.about-open: AboutDialog { x: 0; y: 0; width: 100%; height: 100%; }
+    if App.add-share-open: AddShareDialog { x: 0; y: 0; width: 100%; height: 100%; }
 }
 
