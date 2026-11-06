@@ -1,0 +1,200 @@
+# Builds and tests Tailgate on Linux, Windows and macOS. On a v* tag it uploads all three
+# to that tag's GitHub release, creating a draft release if there isn't one yet (publish it
+# by hand after checking). Existing assets are never replaced: an upload with a name that is
+# already there fails instead. Pushes to main and workflow_dispatch run the same builds and
+# tests and keep the results as workflow artifacts only.
+#
+# macOS signing is optional and switches on by itself when these repository secrets exist
+# (see docs/SIGNING.md): MACOS_CERT_P12 (base64 Developer ID Application .p12),
+# MACOS_CERT_PASSWORD, MACOS_SIGN_IDENTITY, and for notarization NOTARY_KEY_P8 (base64 App
+# Store Connect API key), NOTARY_KEY_ID, NOTARY_ISSUER. Without them the app is ad-hoc signed.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    # Debian 12, so the binary asks for glibc 2.35+ like the v0.1.0 tarball.
+    container: debian:12
+    steps:
+      - name: System packages
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends build-essential pkg-config curl ca-certificates git \
+            python3 libfontconfig1-dev libfreetype6-dev libxkbcommon-dev xvfb xauth \
+            libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6 libxkbcommon-x11-0
+      - uses: actions/checkout@v7
+      - name: Rust
+        run: |
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      # Unit tests plus tests/cli_fake.rs, which drives tests/fake-tailscale.
+      - run: cargo test --release --locked
+      - run: cargo build --release --locked
+      - name: Smoke test (the window opens on Xvfb against the fake CLI, read-only)
+        run: |
+          B=target/release/tailgate
+          $B --version
+          $B --where || true   # no Tailscale in the container
+          FAKE_TS_LOG=$PWD/where.log TAILGATE_TAILSCALE_BIN=$PWD/tests/fake-tailscale $B --where
+          export FAKE_TS_LOG=$PWD/fake.log TAILGATE_TAILSCALE_BIN=$PWD/tests/fake-tailscale TAILGATE_READ_ONLY=1
+          export TAILGATE_CONFIG_DIR=$(mktemp -d) SLINT_BACKEND=winit-software
+          xvfb-run -a -s "-screen 0 1280x900x24" sh -c "$B & P=\$!; sleep 10; kill -0 \$P && kill \$P"
+          grep -q '"status", "--json"' fake.log
+      - run: tools/package-linux.sh target/release/tailgate dist
+      - uses: actions/upload-artifact@v7
+        with: { name: dist-linux, path: dist/*, if-no-files-found: error }
+
+  windows:
+    runs-on: windows-latest
+    env:
+      # Static C runtime: Tailgate.exe runs without the Visual C++ redistributable.
+      RUSTFLAGS: -C target-feature=+crt-static
+      PYTHON: python
+    defaults:
+      run: { shell: bash }
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: cargo test --release --locked
+      - run: cargo build --release --locked
+      - name: Smoke test (CLI)
+        run: |
+          target/release/tailgate.exe --version
+          # The runner has no Tailscale, so discovery should say so.
+          target/release/tailgate.exe --where > where.txt || true
+          cat where.txt
+          grep -q NotFound where.txt
+      - name: Smoke test (window, no Tailscale installed, then against the fake CLI)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force shots | Out-Null
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Shot($name) {
+            $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            $bmp.Save("shots/$name.png")
+          }
+          $env:TAILGATE_CONFIG_DIR = Join-Path $env:RUNNER_TEMP "tg-config"
+          $p = Start-Process target/release/tailgate.exe -PassThru
+          Start-Sleep 10
+          if ($p.HasExited) { throw "Tailgate exited with code $($p.ExitCode)" }
+          Shot "windows-not-installed"
+          Stop-Process $p
+
+          $fake = Join-Path $env:RUNNER_TEMP "tailscale.cmd"
+          $log = Join-Path $env:RUNNER_TEMP "fake.log"
+          $script = Join-Path $PWD "tests/fake-tailscale"
+          "@echo off`r`nset PYTHONUTF8=1`r`npython `"$script`" %*`r`nexit /b %ERRORLEVEL%`r`n" | Set-Content -NoNewline -Encoding ascii $fake
+          $env:FAKE_TS_LOG = $log
+          $env:TAILGATE_TAILSCALE_BIN = $fake
+          $env:TAILGATE_READ_ONLY = "1"
+          $p = Start-Process target/release/tailgate.exe -PassThru
+          Start-Sleep 12
+          if ($p.HasExited) { throw "Tailgate exited with code $($p.ExitCode)" }
+          Shot "windows-fake"
+          Stop-Process $p
+          Get-Content $log
+          if (-not (Select-String -Quiet -SimpleMatch '"status", "--json"' $log)) { throw "Tailgate never asked the fake for status" }
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with: { name: shot-windows, path: shots/*, if-no-files-found: warn }
+      - run: tools/package-windows.sh target/release/tailgate.exe dist
+      - uses: actions/upload-artifact@v7
+        with: { name: dist-windows, path: dist/*, if-no-files-found: error }
+
+  macos:
+    runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          rustup toolchain install stable --profile minimal && rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: cargo test --release --locked
+      - run: cargo build --release --locked --target aarch64-apple-darwin
+      - run: cargo build --release --locked --target x86_64-apple-darwin
+      - name: Smoke test (CLI, then the window against the fake CLI, read-only)
+        run: |
+          B=target/aarch64-apple-darwin/release/tailgate
+          $B --version
+          $B --where || true   # no Tailscale on the runner
+          arch -x86_64 target/x86_64-apple-darwin/release/tailgate --version
+          mkdir -p shots
+          export TAILGATE_CONFIG_DIR=$(mktemp -d)
+          FAKE_TS_LOG=$PWD/fake.log TAILGATE_TAILSCALE_BIN=$PWD/tests/fake-tailscale TAILGATE_READ_ONLY=1 $B & P=$!
+          sleep 12
+          kill -0 $P
+          (screencapture -x shots/macos-fake.png || true)
+          kill $P
+          grep -q '"status", "--json"' fake.log
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with: { name: shot-macos, path: shots/*, if-no-files-found: warn }
+      - name: Signing keychain (only when the secrets exist)
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+        run: |
+          if [ -z "$MACOS_CERT_P12" ] || [ -z "$MACOS_SIGN_IDENTITY" ]; then
+            echo "No signing secrets: the app will be ad-hoc signed."; exit 0
+          fi
+          KC=$RUNNER_TEMP/signing.keychain-db; KCPASS=$(uuidgen)
+          security create-keychain -p "$KCPASS" "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
+          security unlock-keychain -p "$KCPASS" "$KC"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KCPASS" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          echo "MACOS_SIGN_IDENTITY=$MACOS_SIGN_IDENTITY" >> "$GITHUB_ENV"
+          if [ -n "$NOTARY_KEY_P8" ]; then
+            echo "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+            xcrun notarytool store-credentials tailgate-notary --key "$RUNNER_TEMP/notary.p8" \
+              --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" --keychain "$KC"
+            rm "$RUNNER_TEMP/notary.p8"
+            echo "NOTARY_PROFILE=tailgate-notary" >> "$GITHUB_ENV"
+            echo "NOTARY_KEYCHAIN=$KC" >> "$GITHUB_ENV"
+          fi
+      - run: |
+          tools/package-macos.sh target/aarch64-apple-darwin/release/tailgate \
+            target/x86_64-apple-darwin/release/tailgate dist
+      - uses: actions/upload-artifact@v7
+        with: { name: dist-macos, path: dist/*, if-no-files-found: error }
+
+  release:
+    needs: [linux, windows, macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with: { path: dist, pattern: dist-*, merge-multiple: true }
+      - run: ls -la dist
+      - name: Draft the release if the tag has none
+        run: gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --verify-tag --title "Tailgate ${TAG#v}" --notes "Linux, Windows and macOS builds. Notes to follow."
+      - name: Upload (fails rather than overwrite an existing asset)
+        run: gh release upload "$TAG" dist/*

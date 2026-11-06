@@ -1,0 +1,26 @@
+Tailgate for Windows (Windows 10 and 11, 64-bit)
+
+Tailgate is a window onto Tailscale: it shows where your traffic is going, lists exit nodes
+(including Mullvad's) with search and favorites, and switches them for you. It needs Tailscale
+for Windows installed and signed in: https://tailscale.com/download/windows
+Tailgate looks for it in C:\Program Files\Tailscale\tailscale.exe and on your PATH. If it can't
+find it, the window says so and offers a link to the download.
+
+Tailgate is a portable app: unzip this folder anywhere (Documents, Desktop) and double-click
+Tailgate.exe. Nothing is installed and no admin rights are needed. To remove it, delete the
+folder. Its few settings (favorites, theme) live in %APPDATA%\Tailgate.
+
+First launch: Windows SmartScreen may say "Windows protected your PC". Tailgate isn't
+code-signed yet, so Windows doesn't recognise the publisher. Click "More info", check that the
+app is Tailgate.exe, then click "Run anyway". Windows remembers this for this copy.
+
+Changes go through Tailscale's own command line, as the Windows account you're signed in with.
+Tailscale only takes changes from the account that's using it; if it refuses, Tailgate says so
+and nothing changes. Tailgate never asks for admin rights.
+
+Command line (PowerShell or cmd, in this folder): .\Tailgate.exe --help
+.\Tailgate.exe --read-only opens the window with every change switched off.
+
+Free and open source: https://github.com/nunyabiz765/tailgate
+From Center Point Labs: https://centerpointlabs.dev/services/tailgate/
+Not affiliated with Tailscale Inc. or Mullvad VPN AB.

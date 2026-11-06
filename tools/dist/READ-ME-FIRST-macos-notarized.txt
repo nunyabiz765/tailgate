@@ -1,0 +1,20 @@
+Tailgate for macOS (Apple Silicon and Intel, macOS 11 or newer)
+
+Tailgate is a window onto Tailscale: it shows where your traffic is going, lists exit nodes
+(including Mullvad's) with search and favorites, and switches them for you. It needs Tailscale
+for Mac installed and signed in: https://tailscale.com/download/mac
+
+Which Tailscale: the Standalone version from tailscale.com works fully. The Mac App Store
+version also works, but its command line only answers while the Tailscale app is running, and
+Tailgate says so in its window. Homebrew's open-source tailscaled works too.
+
+Install: drag Tailgate into the Applications folder.
+
+Tailgate is signed and notarized by Apple, so it opens like any other app.
+
+Tailgate never asks for your password; changes go through Tailscale's own command line as you.
+Settings (favorites, theme) live in ~/Library/Application Support/Tailgate.
+
+Free and open source: https://github.com/nunyabiz765/tailgate
+From Center Point Labs: https://centerpointlabs.dev/services/tailgate/
+Not affiliated with Tailscale Inc. or Mullvad VPN AB.

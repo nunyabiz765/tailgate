@@ -1,10 +1,20 @@
 # Tailgate
 
-A native Linux desktop app for [Tailscale](https://tailscale.com) and its Mullvad exit nodes: see where your traffic is going, pick an exit node from a searchable list, and turn things on and off without the command line.
+A native desktop app for [Tailscale](https://tailscale.com) and its Mullvad exit nodes, for Linux, Windows and macOS: see where your traffic is going, pick an exit node from a searchable list, and turn things on and off without the command line.
 
 Free and open source. Written in Rust with [Slint](https://slint.dev). It wraps the `tailscale` CLI you already have.
 
-> **Early release (0.1).** Status, devices and serving have been read from a real daemon, and switching exit nodes, the Mullvad on/off switch and the operator grant have worked on one. The other controls haven't been tried on a real daemon yet. See [Known limitations](#known-limitations). `tailgate --read-only` is a safe way to look around first.
+> **Early release (0.2).** On Linux, status, devices and serving have been read from a real daemon, and switching exit nodes, the Mullvad on/off switch and the operator grant have worked on one. Windows and macOS builds are new in 0.2 and less tried: see [Known limitations](#known-limitations). `tailgate --read-only` is a safe way to look around first.
+
+## Download
+
+| | Download | |
+|---|---|---|
+| **Windows** 10 / 11, 64-bit | `tailgate-0.2.0-windows-x86_64.zip` | Unzip anywhere and open `Tailgate.exe`. Portable, nothing to install. |
+| **macOS** 11+, Apple Silicon and Intel | `tailgate-0.2.0-macos-universal.dmg` | Drag Tailgate into Applications. |
+| **Linux** x86_64, glibc 2.35+ | `tailgate-0.2.0-x86_64-linux.tar.gz` | Unpack and run `./install.sh` (below). |
+
+All from the [latest release](https://github.com/nunyabiz765/tailgate/releases/latest), each with a `.sha256` beside it. The Windows and macOS builds aren't code-signed yet, so the first launch needs one extra click; the `READ ME FIRST.txt` inside each download walks through it.
 
 ![Tailgate showing the exit node list](docs/screenshots/exit-nodes.png)
 
@@ -28,20 +38,31 @@ The screenshots use the bundled fake CLI and made-up data, which is why the bann
 
 ## Requirements
 
-- Linux on x86_64 with Wayland or X11, for the prebuilt binary
-- Tailscale installed and running, with the `tailscale` command on your `PATH`
-- Mullvad's add-on on your tailnet, for Mullvad exit nodes. Other exit nodes work without it
-- `pkexec` (polkit) for the permission prompt, `curl` for Check my IP, `xdg-open` for links
-- fontconfig and freetype, which most desktops already have
+- Tailscale installed and signed in. Mullvad's add-on on your tailnet, for Mullvad exit nodes; other exit nodes work without it
+- **Linux:** x86_64 with Wayland or X11 for the prebuilt binary; the `tailscale` command on your `PATH`; `pkexec` (polkit) for the permission prompt, `curl` for Check my IP, `xdg-open` for links; fontconfig and freetype, which most desktops already have
+- **Windows:** 10 or 11, 64-bit, with [Tailscale for Windows](https://tailscale.com/download/windows). Tailgate finds `C:\Program Files\Tailscale\tailscale.exe` (or `tailscale.exe` on `PATH`). `curl` ships with Windows
+- **macOS:** 11 or newer, with [Tailscale for Mac](https://tailscale.com/download/mac). See [Which Tailscale on a Mac](#which-tailscale-on-a-mac)
 
-## Install
+If Tailgate can't find Tailscale on Windows or macOS, the window says so and offers a **Get Tailscale** button. `tailgate --where` prints which `tailscale` it would use.
+
+### Which Tailscale on a Mac
+
+Tailscale for Mac comes in three variants, and Tailgate tells them apart:
+
+- **Standalone** (from tailscale.com): its command line is inside `/Applications/Tailscale.app`, or at `/usr/local/bin/tailscale` once you install the CLI integration from its Settings. Works fully.
+- **Mac App Store**: also has the command line inside the app, but the app is sandboxed and its CLI only answers while the Tailscale app is running. Tailgate shows a note saying so, and if Tailscale refuses a change it suggests the Standalone version.
+- **Open source `tailscaled`** (Homebrew's `tailscale`, at `/opt/homebrew/bin` or `/usr/local/bin`): works like Linux.
+
+Apps opened from Finder don't get your shell's `PATH`, so Tailgate also looks in `/usr/local/bin`, `/opt/homebrew/bin`, `/Applications` and `~/Applications` by name. It sets `TAILSCALE_BE_CLI=1`, Tailscale's documented switch, so the app binary answers as a CLI instead of opening a second Tailscale window.
+
+## Install on Linux
 
 Download the tarball from the [latest release](https://github.com/nunyabiz765/tailgate/releases/latest), check it, and run the installer:
 
 ```sh
-sha256sum -c tailgate-0.1.0-x86_64-linux.tar.gz.sha256
-tar xf tailgate-0.1.0-x86_64-linux.tar.gz
-cd tailgate-0.1.0-x86_64-linux
+sha256sum -c tailgate-0.2.0-x86_64-linux.tar.gz.sha256
+tar xf tailgate-0.2.0-x86_64-linux.tar.gz
+cd tailgate-0.2.0-x86_64-linux
 ./install.sh
 tailgate --read-only
 ```
@@ -74,7 +95,9 @@ This shows live status and refuses every change before anything is run.
 
 ## Permissions
 
-Without an operator set, Tailscale refuses changes from a normal user ("Access denied"). The first time that happens, Tailgate offers two choices:
+**Windows and macOS:** Tailgate runs Tailscale's command line as you and never asks for a password or admin rights. If Tailscale refuses a change (on Windows it only takes changes from the account that's signed in to the Tailscale app), Tailgate shows what Tailscale said and nothing changes.
+
+**Linux:** without an operator set, Tailscale refuses changes from a normal user ("Access denied"). The first time that happens, Tailgate offers two choices:
 
 - **Let Tailgate control Tailscale** runs `pkexec tailscale set --operator=<your username>` once, with your password, then retries what you asked for. The username comes from the system's password database for the account running the app. From then on your account can change Tailscale settings without a password, from Tailgate or from the plain `tailscale` command.
 - **Just this once** runs only that one change through pkexec. Nothing is remembered.
@@ -89,9 +112,9 @@ sudo tailscale set --operator=
 
 ## Settings
 
-Tailgate keeps favorites, the last-used node and view settings in `~/.config/tailgate/state.json`. There are no secrets in it.
+Tailgate keeps favorites, the last-used node and view settings in `state.json`: `~/.config/tailgate/` on Linux, `%APPDATA%\Tailgate\` on Windows, `~/Library/Application Support/Tailgate/` on macOS. There are no secrets in it.
 
-Served ports show as "Port 8443". To give them names, create `~/.config/tailgate/labels.json`. Tailgate only ever reads this file. Ports with the same name are grouped together in the turn-off dialog.
+Served ports show as "Port 8443". To give them names, create `labels.json` in the same folder. Tailgate only ever reads this file. Ports with the same name are grouped together in the turn-off dialog.
 
 ```json
 { "ports": { "8443": "Dashboard", "465": "Mail", "993": "Mail" } }
@@ -99,7 +122,13 @@ Served ports show as "Port 8443". To give them names, create `~/.config/tailgate
 
 ## Known limitations
 
-As of 0.1.0, updated after release:
+As of 0.2.0:
+
+- **Windows:** built and tested only in CI, on GitHub's Windows Server runner: the test suite (including the fake CLI), and the window opening both with no Tailscale installed and against the fake. **It hasn't been run on a real Windows PC or against a real Tailscale for Windows yet.**
+- **macOS:** tested on one Apple Silicon MacBook Air (macOS 26.6, Tailscale Standalone 1.104 with the CLI integration): the test suite, finding Tailscale from a Finder-like environment, and the window reading live status read-only. No change has been made through Tailgate on a Mac yet. The Mac App Store variant is detected and explained but hasn't been tried, and the Intel half of the universal build has only run on CI.
+- **Signing:** the Windows build isn't code-signed and the macOS build isn't notarized yet, so first launch needs the extra click described in `READ ME FIRST.txt`.
+
+Linux, as of 0.1.0, updated after release:
 
 - **Tried on a real Tailscale daemon so far:** switching exit nodes, the Mullvad on/off switch (on returned to the last location) and the operator grant, confirmed afterward with `tailscale` and a Mullvad IP check.
 - **Not yet tried on a real daemon:** LAN access, Tailscale up and down, and running a single change with "Just this once".
@@ -124,7 +153,7 @@ Checked against the Tailscale v1.102.5 CLI source and `--help`:
 
 All process plumbing goes through `src/cli.rs`. Reads are limited to a fixed list, writes to a fixed set of actions, and read-only mode refuses a change before anything is spawned.
 
-`tests/fake-tailscale` stands in for the CLI: it records each argv as JSON, keeps fake state, and can misbehave. `tests/fake-pkexec` does the same for pkexec. Its data in `tests/fixtures/status.json` is synthetic, apart from Mullvad's public server names and locations.
+`tests/fake-tailscale` (Python 3) stands in for the CLI: it records each argv as JSON, keeps fake state, and can misbehave. `tests/fake-pkexec` does the same for pkexec. Its data in `tests/fixtures/status.json` is synthetic, apart from Mullvad's public server names and locations.
 
 ```sh
 cargo test
@@ -146,6 +175,8 @@ grep -vE 'status|prefs' /tmp/ts.log
 
 Other test overrides: `TAILGATE_OPEN_BIN`, `TAILGATE_IPCHECK_URL`, `TAILGATE_READ_TIMEOUT_MS`.
 
+On Windows the tests wrap the fake in a `.cmd` that runs it with `python`. CI (`.github/workflows/release.yml`) runs `cargo test` on Linux, Windows and macOS, opens the window against the fake on all three, and builds the release downloads on every `v*` tag.
+
 `tools/drive-fake.sh` and `tools/drive-states.sh` run the real window on a private Xvfb display, click through every control with XTEST, and save screenshots. `tools/public-shots.sh` retakes the screenshots above. Their coordinates match the default window size, so they need updating if the layout moves.
 
 ## Layout
@@ -162,7 +193,7 @@ Other test overrides: `TAILGATE_OPEN_BIN`, `TAILGATE_IPCHECK_URL`, `TAILGATE_REA
 
 Tailgate's own code is licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
 
-It's built with Slint, used under the [Slint Royalty-free Desktop, Mobile, and Web Applications License 2.0](LICENSES/LicenseRef-Slint-Royalty-free-2.0.md). Slint isn't covered by the MIT and Apache terms. The app shows the required attribution with the `AboutSlint` widget in its About dialog (the ⓘ button at the top). If you distribute a modified build, keep that widget or follow the license's other attribution option. See [NOTICE](NOTICE). Release tarballs include the licenses of the other Rust crates in `THIRD-PARTY-LICENSES.txt`.
+It's built with Slint, used under the [Slint Royalty-free Desktop, Mobile, and Web Applications License 2.0](LICENSES/LicenseRef-Slint-Royalty-free-2.0.md). Slint isn't covered by the MIT and Apache terms. The app shows the required attribution with the `AboutSlint` widget in its About dialog (the ⓘ button at the top). If you distribute a modified build, keep that widget or follow the license's other attribution option. See [NOTICE](NOTICE). Release downloads include the licenses of the other Rust crates in `THIRD-PARTY-LICENSES.txt`. The bundled Noto Serif and Noto Sans Mono fonts are under the [SIL Open Font License 1.1](LICENSES/OFL-1.1-Noto.txt).
 
 <a href="https://slint.dev"><img alt="Made with Slint" src="https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-whitebg.png" width="180"></a>
 

@@ -14,6 +14,7 @@ static NEXT: AtomicU32 = AtomicU32::new(0);
 /// Writes an executable script and waits until it can run. Another test thread
 /// forking at the wrong moment can briefly hold our write handle, which makes
 /// exec fail with "text file busy".
+#[cfg(unix)]
 fn write_script(path: &Path, body: &str) {
     use std::os::unix::fs::PermissionsExt;
     fs::write(path, format!("#!/bin/sh\n[ \"$1\" = __probe ] && exit 0\n{body}\n")).unwrap();
@@ -25,6 +26,40 @@ fn write_script(path: &Path, body: &str) {
         }
     }
     panic!("{} stayed busy", path.display());
+}
+
+/// The fake as a script for this OS: `sh` on Unix, a `.cmd` running Python on Windows.
+#[cfg(unix)]
+fn fake_tailscale(dir: &Path, mode: &str) -> PathBuf {
+    let wrapper = dir.join("tailscale");
+    write_script(
+        &wrapper,
+        &format!(
+            "FAKE_TS_LOG='{log}' FAKE_TS_STATE='{state}' FAKE_TS_MODE='{mode}' exec '{root}/tests/fake-tailscale' \"$@\"",
+            log = dir.join("log").display(),
+            state = dir.join("state").display(),
+            root = env!("CARGO_MANIFEST_DIR"),
+        ),
+    );
+    wrapper
+}
+
+#[cfg(windows)]
+fn fake_tailscale(dir: &Path, mode: &str) -> PathBuf {
+    let wrapper = dir.join("tailscale.cmd");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    fs::write(
+        &wrapper,
+        format!(
+            "@echo off\r\nset \"FAKE_TS_LOG={log}\"\r\nset \"FAKE_TS_STATE={state}\"\r\nset \"FAKE_TS_MODE={mode}\"\r\n\
+             set PYTHONUTF8=1\r\npython \"{script}\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+            log = dir.join("log").display(),
+            state = dir.join("state").display(),
+            script = root.join("tests").join("fake-tailscale").display(),
+        ),
+    )
+    .unwrap();
+    wrapper
 }
 
 /// A fake binary wrapper with its own log, so tests can run in parallel. The
@@ -41,24 +76,23 @@ impl Fake {
         let dir = std::env::temp_dir().join(format!("tailgate-test-{}-{id}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let root = env!("CARGO_MANIFEST_DIR");
-        let wrapper = dir.join("tailscale");
-        write_script(
-            &wrapper,
-            &format!(
-                "FAKE_TS_LOG='{log}' FAKE_TS_STATE='{state}' FAKE_TS_MODE='{mode}' exec '{root}/tests/fake-tailscale' \"$@\"",
-                log = dir.join("log").display(),
-                state = dir.join("state").display(),
-            ),
-        );
-        let pkexec = dir.join("pkexec");
-        write_script(
-            &pkexec,
-            &format!("FAKE_PKEXEC_LOG='{}' exec '{root}/tests/fake-pkexec' \"$@\"", dir.join("pkexec.log").display()),
-        );
+        let wrapper = fake_tailscale(&dir, mode);
+        #[cfg_attr(windows, allow(unused_mut))]
         let mut client = Client::with_bin(&wrapper);
-        client.pkexec = pkexec;
-        client.custom_pkexec = true;
+        #[cfg(unix)]
+        {
+            let pkexec = dir.join("pkexec");
+            write_script(
+                &pkexec,
+                &format!(
+                    "FAKE_PKEXEC_LOG='{}' exec '{}/tests/fake-pkexec' \"$@\"",
+                    dir.join("pkexec.log").display(),
+                    env!("CARGO_MANIFEST_DIR")
+                ),
+            );
+            client.pkexec = pkexec;
+            client.custom_pkexec = true;
+        }
         Fake { dir, client }
     }
 
@@ -211,6 +245,7 @@ fn daemon_down_surfaces_the_cli_message() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn operator_grant_goes_through_pkexec_and_unlocks_later_changes() {
     let fake = Fake::new("denied-until-operator");
@@ -223,6 +258,7 @@ fn operator_grant_goes_through_pkexec_and_unlocks_later_changes() {
     assert!(!prefs.has_exit_node());
 }
 
+#[cfg(unix)]
 #[test]
 fn just_this_once_runs_one_change_elevated_and_grants_nothing() {
     let fake = Fake::new("denied");
@@ -233,6 +269,7 @@ fn just_this_once_runs_one_change_elevated_and_grants_nothing() {
     assert!(matches!(fake.client.mutate(&Action::AllowLan(false), false), Err(CliError::AccessDenied(_))));
 }
 
+#[cfg(unix)]
 #[test]
 fn dismissed_password_prompt_is_a_clean_decline() {
     let fake = Fake::new("denied");
@@ -252,6 +289,7 @@ fn dismissed_password_prompt_is_a_clean_decline() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn test_binary_is_never_run_through_the_real_pkexec() {
     let fake = Fake::new("ok");
@@ -259,5 +297,17 @@ fn test_binary_is_never_run_through_the_real_pkexec() {
     client.custom_pkexec = false;
     client.pkexec = PathBuf::from("/nonexistent/should-not-run");
     assert_eq!(client.mutate(&Action::Up, true), Err(CliError::ElevationRefused));
+    assert!(fake.calls().is_empty());
+}
+
+/// Windows and macOS have no pkexec, so an elevated change is refused before
+/// anything runs, whatever the binary.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn no_elevation_outside_linux() {
+    let fake = Fake::new("ok");
+    let mut client = fake.client.clone();
+    client.custom_pkexec = false;
+    assert_eq!(client.mutate(&Action::Up, true), Err(CliError::ElevationUnavailable));
     assert!(fake.calls().is_empty());
 }

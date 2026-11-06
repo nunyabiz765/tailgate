@@ -225,6 +225,11 @@ impl Controller {
                 }
                 self.state.borrow_mut().permission = None;
             }
+            // No pkexec on Windows or macOS, so explain instead of offering a prompt.
+            Err(CliError::AccessDenied(msg)) if !cli::ELEVATION => {
+                self.state.borrow_mut().permission = None;
+                self.notify(2, format!("Couldn't {}. Tailscale refused: {msg} {}", action.describe(), denied_hint(self.client.variant)));
+            }
             Err(CliError::AccessDenied(_)) if !elevated => {
                 if let Some(ui) = self.ui() {
                     ui.global::<AppGlobal>().set_permission_lead(
@@ -632,6 +637,7 @@ pub fn run(read_only: bool) -> Result<(), slint::PlatformError> {
 
     let ui = AppWindow::new()?;
     // Ties the window to tailgate.desktop. Needs the backend `new` just started.
+    #[cfg(target_os = "linux")]
     slint::set_xdg_app_id("tailgate")?;
     ui.global::<Theme>().set_dark(saved.dark);
 
@@ -643,8 +649,9 @@ pub fn run(read_only: bool) -> Result<(), slint::PlatformError> {
         (true, true) => format!("Read-only mode, using a test binary: {}", client.bin.display()),
         (true, false) => "Read-only mode: nothing here can change Tailscale.".to_string(),
         (false, true) => format!("Using a test binary: {}", client.bin.display()),
-        (false, false) => String::new(),
+        (false, false) => client.variant.note().unwrap_or_default().to_string(),
     };
+    let banner_action = if client.variant == cli::Variant::NotFound { "Get Tailscale" } else { "" };
 
     let controller = Rc::new(Controller {
         ui: ui.as_weak(),
@@ -663,6 +670,8 @@ pub fn run(read_only: bool) -> Result<(), slint::PlatformError> {
 
     let app = ui.global::<AppGlobal>();
     app.set_banner(banner.into());
+    app.set_banner_action(banner_action.into());
+    app.on_banner_clicked(|| with(|c| c.open(cli::DOWNLOAD_URL)));
     app.set_version(env!("CARGO_PKG_VERSION").into());
     let user = if controller.user.is_empty() { "your user" } else { controller.user.as_str() };
     app.set_operator_detail(
@@ -811,6 +820,21 @@ pub fn run(read_only: bool) -> Result<(), slint::PlatformError> {
     let result = ui.run();
     CONTROLLER.with(|c| *c.borrow_mut() = None);
     result
+}
+
+/// What to try when Tailscale on Windows or macOS refuses a change.
+fn denied_hint(variant: cli::Variant) -> &'static str {
+    match variant {
+        cli::Variant::Windows => {
+            "On Windows, Tailscale takes changes from the account that's signed in to the Tailscale app. \
+             Check the Tailscale icon in the taskbar, then try again."
+        }
+        cli::Variant::MacAppStore => {
+            "The App Store version only takes changes while its app is running. Open Tailscale from the \
+             menu bar and try again, or switch to the Standalone version from tailscale.com/download."
+        }
+        _ => "Try the same change in the Tailscale app.",
+    }
 }
 
 /// Callbacks run on the UI thread, where the controller is already reachable.

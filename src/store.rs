@@ -1,5 +1,6 @@
 //! Favorites, last-used node and a couple of view settings, in
-//! `~/.config/tailgate/state.json`. Contains node names only, no secrets.
+//! `~/.config/tailgate/state.json` (Linux; %APPDATA%\Tailgate on Windows,
+//! ~/Library/Application Support/Tailgate on macOS). Node names only, no secrets.
 //! Optional names for served ports come from `labels.json` beside it, which
 //! Tailgate only reads.
 
@@ -56,6 +57,17 @@ impl Saved {
 pub fn default_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("TAILGATE_CONFIG_DIR").filter(|v| !v.is_empty()) {
         return PathBuf::from(dir).join("state.json");
+    }
+    // %APPDATA%\Tailgate and ~/Library/Application Support/Tailgate.
+    if cfg!(windows) {
+        if let Some(dir) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
+            return PathBuf::from(dir).join("Tailgate").join("state.json");
+        }
+    }
+    if cfg!(target_os = "macos") {
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            return PathBuf::from(home).join("Library/Application Support/Tailgate/state.json");
+        }
     }
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())

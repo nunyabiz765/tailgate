@@ -4,9 +4,13 @@
 //! in the app can assemble an arbitrary command line. Read-only mode is
 //! enforced in [`Client::mutate`], before anything is spawned.
 
+use std::ffi::OsString;
 use std::io::Read;
 use std::net::IpAddr;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -108,12 +112,22 @@ pub enum CliError {
     AuthDeclined,
     /// A test double is configured with no fake pkexec, so we won't run it as root.
     ElevationRefused,
+    /// Windows and macOS have no pkexec; Tailgate never asks for admin rights there.
+    ElevationUnavailable,
 }
+
+/// What Windows and macOS show when discovery finds no tailscale CLI anywhere.
+pub const NOT_FOUND: &str =
+    "Tailscale isn't installed, or Tailgate couldn't find it. Install it from tailscale.com/download, then reopen Tailgate.";
+pub const DOWNLOAD_URL: &str = "https://tailscale.com/download";
 
 impl std::fmt::Display for CliError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CliError::Missing(path) => write!(f, "Couldn't find {}. Is it installed?", path.display()),
+            CliError::Missing(path) if cfg!(target_os = "linux") || path.file_stem() != Some("tailscale".as_ref()) => {
+                write!(f, "Couldn't find {}. Is it installed?", path.display())
+            }
+            CliError::Missing(_) => write!(f, "{NOT_FOUND}"),
             CliError::AccessDenied(msg) => write!(f, "Tailscale refused: {msg}"),
             CliError::Timeout(t) => write!(f, "No answer after {} seconds.", t.as_secs()),
             CliError::Failed(msg) => write!(f, "{msg}"),
@@ -124,6 +138,7 @@ impl std::fmt::Display for CliError {
             CliError::ElevationRefused => {
                 write!(f, "A test binary is configured, so Tailgate won't run it as root.")
             }
+            CliError::ElevationUnavailable => write!(f, "Tailgate doesn't run Tailscale as administrator on this system."),
         }
     }
 }
@@ -138,6 +153,8 @@ pub struct Client {
     pub custom_pkexec: bool,
     pub read_timeout: Duration,
     pub write_timeout: Option<Duration>,
+    /// Which kind of Tailscale install the binary belongs to.
+    pub variant: Variant,
 }
 
 impl Client {
@@ -149,14 +166,19 @@ impl Client {
             .and_then(|v| v.parse().ok())
             .map(Duration::from_millis)
             .unwrap_or(READ_TIMEOUT);
+        let found = match &bin_env {
+            Some(bin) => Found { bin: PathBuf::from(bin), variant: Variant::Custom },
+            None => discover(),
+        };
         Client {
             custom_bin: bin_env.is_some(),
             custom_pkexec: pkexec_env.is_some(),
-            bin: bin_env.map(PathBuf::from).unwrap_or_else(|| find_in_path("tailscale")),
+            bin: found.bin,
             pkexec: pkexec_env.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("pkexec")),
             read_only,
             read_timeout,
             write_timeout: None,
+            variant: found.variant,
         }
     }
 
@@ -170,6 +192,7 @@ impl Client {
             custom_pkexec: false,
             read_timeout: READ_TIMEOUT,
             write_timeout: None,
+            variant: Variant::Custom,
         }
     }
 
@@ -200,6 +223,9 @@ impl Client {
     }
 
     fn elevated(&self, args: &[String]) -> Result<String, CliError> {
+        if !ELEVATION && !self.custom_pkexec {
+            return Err(CliError::ElevationUnavailable);
+        }
         if self.custom_bin && !self.custom_pkexec {
             return Err(CliError::ElevationRefused);
         }
@@ -217,16 +243,129 @@ impl Client {
     }
 }
 
-fn find_in_path(name: &str) -> PathBuf {
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return candidate;
-            }
+/// pkexec exists only on Linux. Elsewhere an "access denied" gets an explanation
+/// instead of a password prompt.
+pub const ELEVATION: bool = cfg!(target_os = "linux");
+
+/// The kind of Tailscale install found, which decides what Tailgate can promise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Variant {
+    /// `tailscale` on PATH, as on Linux.
+    Path,
+    /// TAILGATE_TAILSCALE_BIN, or a test.
+    Custom,
+    /// tailscale.exe from the Windows installer.
+    Windows,
+    /// The macOS Standalone app from tailscale.com (its CLI works fully).
+    MacStandalone,
+    /// The Mac App Store app: sandboxed, its CLI only works while the app runs.
+    MacAppStore,
+    /// The open-source tailscaled, e.g. from Homebrew.
+    MacOpenSource,
+    /// Nothing found on Windows or macOS.
+    NotFound,
+}
+
+impl Variant {
+    /// A short sentence for the banner, or nothing when there's nothing to say.
+    pub fn note(self) -> Option<&'static str> {
+        match self {
+            Variant::NotFound => Some(NOT_FOUND),
+            Variant::MacAppStore => Some(
+                "Tailscale from the Mac App Store: Tailgate uses the command line built into that app, which \
+                 only answers while the Tailscale app is running (keep its menu bar icon up). If a change \
+                 is refused, the Standalone version from tailscale.com/download has the full command line.",
+            ),
+            _ => None,
         }
     }
-    PathBuf::from(name)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub bin: PathBuf,
+    pub variant: Variant,
+}
+
+/// Where the system's tailscale CLI lives. Linux is the PATH lookup it always was.
+pub fn discover() -> Found {
+    let env = Probe {
+        path: std::env::var_os("PATH"),
+        home: std::env::var_os("HOME").map(PathBuf::from),
+        program_files: std::env::var_os("ProgramFiles").map(PathBuf::from),
+        is_file: &|p: &Path| p.is_file(),
+    };
+    if cfg!(windows) {
+        discover_windows(&env)
+    } else if cfg!(target_os = "macos") {
+        discover_macos(&env)
+    } else {
+        match find_on(env.path.as_ref(), "tailscale", env.is_file) {
+            Some(bin) => Found { bin, variant: Variant::Path },
+            None => Found { bin: PathBuf::from("tailscale"), variant: Variant::Path },
+        }
+    }
+}
+
+/// Discovery's view of the system, so tests can fake every OS on any OS.
+pub struct Probe<'a> {
+    pub path: Option<OsString>,
+    pub home: Option<PathBuf>,
+    pub program_files: Option<PathBuf>,
+    pub is_file: &'a dyn Fn(&Path) -> bool,
+}
+
+pub fn discover_windows(env: &Probe) -> Found {
+    if let Some(bin) = find_on(env.path.as_ref(), "tailscale.exe", env.is_file) {
+        return Found { bin, variant: Variant::Windows };
+    }
+    let mut dirs: Vec<PathBuf> = env.program_files.iter().cloned().collect();
+    dirs.push(PathBuf::from(r"C:\Program Files"));
+    for dir in dirs {
+        let bin = dir.join("Tailscale").join("tailscale.exe");
+        if (env.is_file)(&bin) {
+            return Found { bin, variant: Variant::Windows };
+        }
+    }
+    Found { bin: PathBuf::from("tailscale.exe"), variant: Variant::NotFound }
+}
+
+/// Apps opened from Finder get a bare PATH (/usr/bin:/bin:/usr/sbin:/sbin), so
+/// the usual install spots are checked by name as well.
+pub fn discover_macos(env: &Probe) -> Found {
+    let mut apps = vec![PathBuf::from("/Applications/Tailscale.app")];
+    if let Some(home) = &env.home {
+        apps.push(home.join("Applications").join("Tailscale.app"));
+    }
+    let app = apps.into_iter().find(|app| (env.is_file)(&app.join("Contents/MacOS/Tailscale")));
+    let app_variant = app.as_ref().map(|app| {
+        if (env.is_file)(&app.join("Contents/_MASReceipt/receipt")) {
+            Variant::MacAppStore
+        } else {
+            Variant::MacStandalone
+        }
+    });
+
+    let mut search: Vec<PathBuf> = env.path.as_ref().map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
+    for extra in ["/usr/local/bin", "/opt/homebrew/bin"] {
+        if !search.iter().any(|d| d == Path::new(extra)) {
+            search.push(PathBuf::from(extra));
+        }
+    }
+    let joined = std::env::join_paths(&search).ok();
+    if let Some(bin) = find_on(joined.as_ref(), "tailscale", env.is_file) {
+        // The Standalone app's "CLI integration" is a launcher script in
+        // /usr/local/bin; with an app installed, the CLI is that app's.
+        return Found { bin, variant: app_variant.unwrap_or(Variant::MacOpenSource) };
+    }
+    match (app, app_variant) {
+        (Some(app), Some(variant)) => Found { bin: app.join("Contents/MacOS/Tailscale"), variant },
+        _ => Found { bin: PathBuf::from("tailscale"), variant: Variant::NotFound },
+    }
+}
+
+fn find_on(paths: Option<&OsString>, name: &str, is_file: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
+    std::env::split_paths(paths?).map(|dir| dir.join(name)).find(|candidate| is_file(candidate))
 }
 
 fn classify(out: &Output) -> CliError {
@@ -261,12 +400,18 @@ pub struct Output {
 
 /// Runs a program with a hard deadline. Called from worker threads only.
 pub fn run(program: &Path, args: &[String], timeout: Duration) -> Result<Output, CliError> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
+    let mut command = Command::new(program);
+    command.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+    // CREATE_NO_WINDOW: no console flashing up behind the window on every poll.
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    // The Mac app's binary picks GUI or CLI from the environment; a GUI parent
+    // looks like Finder, so say which one we want (Tailscale's documented switch).
+    #[cfg(target_os = "macos")]
+    command.env("TAILSCALE_BE_CLI", "1");
+    let mut child = command
         .spawn()
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => CliError::Missing(program.to_path_buf()),
@@ -281,9 +426,7 @@ pub fn run(program: &Path, args: &[String], timeout: Duration) -> Result<Output,
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= timeout => {
-                // Signal the group so a shell wrapper's children die with it.
-                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-                let _ = child.kill();
+                kill_tree(&mut child);
                 let _ = child.wait();
                 return Err(CliError::Timeout(timeout));
             }
@@ -304,6 +447,25 @@ pub fn run(program: &Path, args: &[String], timeout: Duration) -> Result<Output,
         stdout: stdout.text(),
         stderr: stderr.text(),
     })
+}
+
+/// Kills the child and anything it started, so a wrapper's children die with it.
+fn kill_tree(child: &mut std::process::Child) {
+    // Signal the group (the child leads its own, see `run`).
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL)
+    };
+    // No process groups to signal on Windows; taskkill /T walks the tree.
+    #[cfg(windows)]
+    let _ = Command::new("taskkill")
+        .args(["/F", "/T", "/PID", &child.id().to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(0x0800_0000)
+        .status();
+    let _ = child.kill();
 }
 
 struct Collector {
@@ -337,6 +499,7 @@ fn collect<R: Read + Send + 'static>(reader: Option<R>) -> Collector {
 }
 
 /// The logged-in user, from the password database rather than the environment.
+#[cfg(unix)]
 pub fn current_user() -> Option<String> {
     unsafe {
         let pw = libc::getpwuid(libc::getuid());
@@ -347,16 +510,34 @@ pub fn current_user() -> Option<String> {
     }
 }
 
-/// Opens an https URL with xdg-open and reaps the child off-thread.
+/// Only used for the Linux operator grant, which Windows doesn't have.
+#[cfg(not(unix))]
+pub fn current_user() -> Option<String> {
+    None
+}
+
+/// The system's "open this link" program: xdg-open, open, or Windows' URL handler.
+fn default_opener() -> (PathBuf, &'static [&'static str]) {
+    if cfg!(windows) {
+        (PathBuf::from("rundll32"), &["url.dll,FileProtocolHandler"])
+    } else if cfg!(target_os = "macos") {
+        (PathBuf::from("/usr/bin/open"), &[])
+    } else {
+        (PathBuf::from("xdg-open"), &[])
+    }
+}
+
+/// Opens an https URL in the browser and reaps the child off-thread.
 pub fn open_url(url: &str) -> Result<(), CliError> {
     if !url.starts_with("https://") {
         return Err(CliError::Invalid(format!("Refusing to open '{url}'")));
     }
-    let opener = std::env::var_os("TAILGATE_OPEN_BIN")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("xdg-open"));
+    let (opener, lead) = match std::env::var_os("TAILGATE_OPEN_BIN").filter(|v| !v.is_empty()) {
+        Some(bin) => (PathBuf::from(bin), &[][..]),
+        None => default_opener(),
+    };
     let mut child = Command::new(&opener)
+        .args(lead)
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -425,6 +606,81 @@ mod tests {
             stderr: "ACCESS DENIED: checkprefs access denied\n".into(),
         };
         assert!(matches!(classify(&out), CliError::AccessDenied(_)));
+    }
+
+    fn probe<'a>(path: Option<&str>, is_file: &'a dyn Fn(&Path) -> bool) -> Probe<'a> {
+        Probe {
+            path: path.map(OsString::from),
+            home: Some(PathBuf::from("/Users/pat")),
+            program_files: Some(PathBuf::from(r"D:\Apps")),
+            is_file,
+        }
+    }
+
+    fn has<'a>(files: &'a [&'a str]) -> impl Fn(&Path) -> bool + 'a {
+        move |p: &Path| {
+            let p = p.to_string_lossy().replace('\\', "/");
+            files.iter().any(|f| f.replace('\\', "/") == p)
+        }
+    }
+
+    #[test]
+    fn windows_finds_the_installer_copy_or_says_not_found() {
+        let files = [r"C:\Program Files/Tailscale/tailscale.exe"];
+        let f = has(&files);
+        let found = discover_windows(&probe(None, &f));
+        assert_eq!(found.variant, Variant::Windows);
+        assert!(found.bin.to_string_lossy().replace('\\', "/").ends_with("Program Files/Tailscale/tailscale.exe"));
+
+        let files = [r"D:\Apps/Tailscale/tailscale.exe"];
+        let f = has(&files);
+        let found = discover_windows(&probe(None, &f));
+        assert!(found.bin.to_string_lossy().replace('\\', "/").starts_with("D:/Apps"), "{found:?}");
+
+        let none: [&str; 0] = [];
+        let f = has(&none);
+        assert_eq!(discover_windows(&probe(None, &f)).variant, Variant::NotFound);
+        assert!(Variant::NotFound.note().unwrap().contains("tailscale.com/download"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn macos_tells_the_three_variants_apart() {
+        let standalone = ["/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
+        let f = has(&standalone);
+        let found = discover_macos(&probe(Some("/usr/bin:/bin"), &f));
+        assert_eq!(found, Found { bin: standalone[0].into(), variant: Variant::MacStandalone });
+
+        // CLI integration installed: the launcher wins, the variant is still the app's.
+        let launcher = ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/usr/local/bin/tailscale"];
+        let f = has(&launcher);
+        let found = discover_macos(&probe(Some("/usr/bin:/bin"), &f));
+        assert_eq!(found, Found { bin: "/usr/local/bin/tailscale".into(), variant: Variant::MacStandalone });
+
+        let store = ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/Applications/Tailscale.app/Contents/_MASReceipt/receipt"];
+        let f = has(&store);
+        let found = discover_macos(&probe(Some("/usr/bin:/bin"), &f));
+        assert_eq!(found.variant, Variant::MacAppStore);
+        assert!(found.variant.note().unwrap().contains("App Store"));
+
+        let user_app = ["/Users/pat/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
+        let f = has(&user_app);
+        assert_eq!(discover_macos(&probe(None, &f)).bin, PathBuf::from(user_app[0]));
+
+        let brew = ["/opt/homebrew/bin/tailscale"];
+        let f = has(&brew);
+        assert_eq!(discover_macos(&probe(Some("/usr/bin"), &f)).variant, Variant::MacOpenSource);
+
+        let none: [&str; 0] = [];
+        let f = has(&none);
+        assert_eq!(discover_macos(&probe(Some("/usr/bin"), &f)).variant, Variant::NotFound);
+    }
+
+    #[test]
+    fn standalone_and_linux_variants_have_nothing_to_explain() {
+        for v in [Variant::Path, Variant::Custom, Variant::Windows, Variant::MacStandalone, Variant::MacOpenSource] {
+            assert_eq!(v.note(), None);
+        }
     }
 
     #[test]

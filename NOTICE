@@ -11,11 +11,14 @@ distribute a modified build, keep that widget, or display the Slint attribution 
 of the license allows. Other Slint licensing options, including GPL-3.0-only, are described by
 Slint itself.
 
-Release tarballs also include THIRD-PARTY-LICENSES.txt, covering the Rust crates linked into the
+The bundled fonts in assets/fonts (Noto Serif, Noto Sans Mono; Copyright 2022 The Noto Project
+Authors) are under the SIL Open Font License 1.1, in LICENSES/OFL-1.1-Noto.txt.
+
+Release downloads also include THIRD-PARTY-LICENSES.txt, covering the Rust crates linked into the
 binary. tools/third-party-licenses.py regenerates it.
 
-Tailgate runs, but does not link or bundle, these external programs: tailscale, pkexec, curl and
-xdg-open.
+Tailgate runs, but does not link or bundle, these external programs: tailscale, curl, and the
+system's link opener (xdg-open, open, or rundll32), plus pkexec on Linux.
 
 Tailgate is not affiliated with or endorsed by Tailscale Inc. or Mullvad VPN AB. Tailscale and
 Mullvad are their trademarks.

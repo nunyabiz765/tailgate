@@ -43,6 +43,8 @@ export global App {
     in property <string> tailnet;
     in property <string> health;
     in property <string> banner;
+    // A button in the banner, e.g. "Get Tailscale" when it isn't installed.
+    in property <string> banner-action;
     in property <string> control-note;
 
     // Controls
@@ -115,6 +117,7 @@ export global App {
     callback check-ip();
     callback open-admin();
     callback open-source();
+    callback banner-clicked();
     callback dismiss-notice();
     callback confirm-accept();
     callback confirm-cancel();
@@ -1001,12 +1004,19 @@ export component AppWindow inherits Window {
             border-radius: 10px;
             HorizontalLayout {
                 padding: 10px;
+                spacing: 10px;
                 Text {
                     text: App.banner;
                     color: Theme.ink;
                     font-size: 12.5px;
                     wrap: word-wrap;
+                    vertical-alignment: center;
                     horizontal-stretch: 1;
+                }
+                if App.banner-action != "": Btn {
+                    text: App.banner-action;
+                    kind: 1;
+                    clicked => { App.banner-clicked(); }
                 }
             }
         }
