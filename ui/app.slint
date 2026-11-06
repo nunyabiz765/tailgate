@@ -103,6 +103,9 @@ export global App {
     in property <string> setup-install;
     in property <bool> setup-operator;
     in property <string> setup-user;
+    // The .deb's one-click installer is there (otherwise the guide shows Terminal steps).
+    in property <bool> setup-can-install;
+    in property <bool> setup-installing;
 
     in property <string> version;
     in-out property <bool> about-open: false;
@@ -128,6 +131,7 @@ export global App {
     callback confirm-accept();
     callback confirm-cancel();
     callback permission-operator();
+    callback install-tailscale();
     callback permission-once();
     callback permission-cancel();
     callback toggle-theme();
@@ -775,6 +779,30 @@ component SetupStep {
     }
 }
 
+// The one-click install, with its progress underneath while it runs.
+component InstallButton {
+    in property <string> text;
+    VerticalLayout {
+        spacing: 8px;
+        HorizontalLayout {
+            alignment: start;
+            Btn {
+                text: App.setup-installing ? "Working…" : root.text;
+                kind: 1;
+                enabled: !App.busy;
+                clicked => { App.install-tailscale(); }
+            }
+        }
+        if App.setup-installing: Text {
+            text: App.busy-text;
+            color: Theme.accent;
+            font-size: 14px;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+    }
+}
+
 // Shown instead of the tabs until Tailscale answers and is signed in.
 component SetupPane {
     ScrollView {
@@ -806,10 +834,15 @@ component SetupPane {
                 done: App.setup-step > 1;
                 current: App.setup-step == 1;
                 text: App.setup-step > 1 ? "Done."
+                    : App.setup-can-install
+                    ? "Click the button, then type your computer password when a box asks for it. Tailgate downloads Tailscale and sets it up. It takes a minute or two."
                     : "Open the Terminal app (press Ctrl + Alt + T), paste this line with Ctrl + Shift + V, and press Enter. Type your computer password when it asks; the letters stay hidden while you type, that's normal.";
-                if App.setup-step == 1: CommandLine { command: App.setup-install; }
+                if App.setup-step == 1 && App.setup-can-install: InstallButton { text: "Install Tailscale"; }
+                if App.setup-step == 1 && !App.setup-can-install: CommandLine { command: App.setup-install; }
                 if App.setup-step == 1: Text {
-                    text: "This runs Tailscale's official installer from tailscale.com. It adds Tailscale's own software source, so updates arrive with your normal system updates.";
+                    text: App.setup-can-install
+                        ? "Tailscale comes from its official software source (pkgs.tailscale.com), so updates arrive with your normal system updates."
+                        : "This runs Tailscale's official installer from tailscale.com. It adds Tailscale's own software source, so updates arrive with your normal system updates.";
                     color: Theme.soft;
                     font-size: 12px;
                     wrap: word-wrap;
@@ -817,18 +850,23 @@ component SetupPane {
             }
             if App.setup-step == 2: SetupStep {
                 number: 1;
-                title: "Start Tailscale's background service";
+                title: "Start Tailscale";
                 current: true;
-                text: "Open the Terminal app (Ctrl + Alt + T), paste this line with Ctrl + Shift + V, and press Enter. Type your computer password when it asks.";
-                CommandLine { command: "sudo systemctl enable --now tailscaled"; }
+                text: App.setup-can-install
+                    ? "Tailscale is on this computer but switched off. Click the button, then type your computer password when a box asks for it."
+                    : "Open the Terminal app (Ctrl + Alt + T), paste this line with Ctrl + Shift + V, and press Enter. Type your computer password when it asks.";
+                if App.setup-can-install: InstallButton { text: "Start Tailscale"; }
+                if !App.setup-can-install: CommandLine { command: "sudo systemctl enable --now tailscaled"; }
             }
             SetupStep {
                 number: 2;
                 title: "Sign in";
                 current: App.setup-step == 3;
-                text: App.setup-step == 3
-                    ? "Click the button and sign in to your Tailscale account in the browser (making one is free). If the button asks for your password, choose \"Let Tailgate control Tailscale\"."
-                    : "After step 1, sign in to your Tailscale account (making one is free). The button for it appears here.";
+                text: App.setup-step != 3
+                    ? "After step 1, sign in to your Tailscale account (making one is free). The button for it appears here."
+                    : App.setup-operator
+                    ? "Click the button. Your web browser opens: sign in to Tailscale there (making an account is free), then come back to this window."
+                    : "Click the button and sign in to your Tailscale account in the browser (making one is free). If the button asks for your password, choose \"Let Tailgate control Tailscale\".";
                 if App.setup-step == 3: HorizontalLayout {
                     alignment: start;
                     Btn {
@@ -838,12 +876,12 @@ component SetupPane {
                         clicked => { App.toggle-up(); }
                     }
                 }
-                if App.setup-step == 3: Text {
+                if App.setup-step == 3 && !App.setup-can-install: Text {
                     text: "Or in the Terminal:";
                     color: Theme.soft;
                     font-size: 12px;
                 }
-                if App.setup-step == 3: CommandLine { command: "sudo tailscale up"; }
+                if App.setup-step == 3 && !App.setup-can-install: CommandLine { command: "sudo tailscale up"; }
             }
             SetupStep {
                 number: 3;
@@ -851,9 +889,21 @@ component SetupPane {
                 done: App.setup-operator;
                 text: App.setup-operator
                     ? "Done: " + App.setup-user + " can change Tailscale without a password."
+                    : App.setup-can-install && App.setup-step != 3
+                    ? "Linux only lets an administrator change Tailscale. Step 1 takes care of this too, with the same password."
+                    : App.setup-can-install
+                    ? "Linux only lets an administrator change Tailscale. Click Allow and type your password once; after that Tailgate never asks again."
                     : "Linux only lets an administrator change Tailscale. The first time you switch something, Tailgate asks for your password once and makes your account Tailscale's operator. To do it ahead of time instead, run:";
-                if !App.setup-operator: CommandLine { command: "sudo tailscale set --operator=$USER"; }
-                if !App.setup-operator: Text {
+                if !App.setup-operator && App.setup-can-install && App.setup-step == 3: HorizontalLayout {
+                    alignment: start;
+                    Btn {
+                        text: "Allow";
+                        enabled: !App.busy;
+                        clicked => { App.permission-operator(); }
+                    }
+                }
+                if !App.setup-operator && !App.setup-can-install: CommandLine { command: "sudo tailscale set --operator=$USER"; }
+                if !App.setup-operator && !App.setup-can-install: Text {
                     text: "To undo it later: sudo tailscale set --operator=";
                     color: Theme.soft;
                     font-size: 12px;

@@ -1,0 +1,174 @@
+#!/bin/sh
+# Tailgate's one-click Tailscale setup, run as root through pkexec when someone clicks
+# "Install Tailscale" or "Start Tailscale" on Tailgate's first-run page.
+#
+# It does what tailscale.com/install.sh does on Ubuntu, Zorin OS, Linux Mint, Pop!_OS and
+# Debian: adds Tailscale's own apt repository and installs the tailscale package from it.
+# The repository's signing key ships inside Tailgate's .deb (fingerprint below) instead
+# of being downloaded at install time. Then it starts tailscaled and makes the person who
+# clicked Tailscale's operator, so one password covers all of it.
+#
+# Takes no arguments. The user comes from PKEXEC_UID (or SUDO_USER), never from argv.
+# Progress for the app goes to stdout as "step: ..." lines; the full record goes to
+# /var/log/tailgate-install.log. Exit codes (Tailgate words them, see src/cli.rs):
+#   0 done   20 offline   21 another installer holds the lock   22 system not supported
+#   23 apt couldn't install   24 tailscaled didn't start   25 couldn't set the operator
+#   2 wrong usage
+set -u
+umask 022
+export DEBIAN_FRONTEND=noninteractive LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+# Tailscale Inc. (Package repository signing key) <info@tailscale.com>, fingerprint
+# 2596 A99E AAB3 3821 893C 0A79 458C A832 957F 5868, checked by tools/package-deb.sh.
+SHIPPED_KEY=/usr/share/tailgate/tailscale-archive-keyring.gpg
+KEYRING=/usr/share/keyrings/tailscale-archive-keyring.gpg
+LIST=/etc/apt/sources.list.d/tailscale.list
+LOG=/var/log/tailgate-install.log
+WAIT_FOR_LOCK=${TAILGATE_LOCK_WAIT:-300}   # pkexec clears the environment; tests shorten it
+
+# The parser on its own, for tests: install-tailscale --detect OS-RELEASE-FILE
+detect() {
+    get() { sed -n "s/^$1=//p" "$2" | head -n1 | tr -d "\"'"; }
+    id=$(get ID "$1"); like=$(get ID_LIKE "$1")
+    ucode=$(get UBUNTU_CODENAME "$1"); vcode=$(get VERSION_CODENAME "$1")
+    # Zorin, Mint, Pop!_OS, elementary and KDE neon all name their Ubuntu base here.
+    if [ -n "$ucode" ]; then echo "ubuntu $ucode"; return 0; fi
+    case " $id $like " in
+        *" ubuntu "*) [ -n "$vcode" ] && { echo "ubuntu $vcode"; return 0; } ;;
+        *" debian "*) [ -n "$vcode" ] && { echo "debian $vcode"; return 0; } ;;
+    esac
+    return 1
+}
+if [ "${1:-}" = --detect ] && [ $# -eq 2 ]; then
+    detect "$2" || { echo unsupported; exit 22; }
+    exit 0
+fi
+if [ $# -ne 0 ]; then
+    echo "usage: install-tailscale (no arguments; Tailgate runs it through pkexec)" >&2
+    exit 2
+fi
+if [ "$(id -u)" != 0 ]; then
+    echo "install-tailscale has to run as root (Tailgate uses pkexec)." >&2
+    exit 2
+fi
+
+touch "$LOG" && chmod 644 "$LOG"
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; }
+step() { echo "step: $*"; log "step: $*"; }
+fail() { # code, plain-English reason (last stderr line, shown by Tailgate)
+    log "FAILED ($1): $2"
+    echo "$2" >&2
+    exit "$1"
+}
+log "---- Tailgate install-tailscale (uid ${PKEXEC_UID:-?})"
+
+# Who clicked the button.
+user=
+if [ -n "${PKEXEC_UID:-}" ] && [ "$PKEXEC_UID" != 0 ]; then
+    user=$(getent passwd "$PKEXEC_UID" | cut -d: -f1)
+elif [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    user=$SUDO_USER
+fi
+
+# Runs an apt command, waiting while Software Updater or GNOME Software holds the lock.
+# Leaves its output in $OUT.
+OUT=$(mktemp); trap 'rm -f "$OUT"' EXIT
+apt_run() {
+    waited=0; said=
+    while :; do
+        "$@" > "$OUT" 2>&1; rc=$?
+        cat "$OUT" >> "$LOG"
+        if grep -qE 'Could not get lock|Unable to acquire the dpkg frontend lock|Unable to lock (the )?(directory|administration)' "$OUT"; then
+            if [ "$waited" -ge "$WAIT_FOR_LOCK" ]; then
+                fail 21 "Another program is installing updates (often Software Updater). Let it finish, then try again."
+            fi
+            [ -n "$said" ] || step "Waiting for another update to finish…"
+            said=1; sleep 5; waited=$((waited + 5)); continue
+        fi
+        return $rc
+    done
+}
+offline() { grep -qE 'Temporary failure resolving|Could not resolve|Could not connect|Connection failed|Network is unreachable|No route to host|Connection timed out|Failed to fetch https://pkgs\.tailscale\.com' "$OUT"; }
+
+if command -v tailscale >/dev/null 2>&1; then
+    step "Tailscale is already installed."
+else
+    command -v apt-get >/dev/null 2>&1 || fail 22 "This system doesn't use apt, so Tailgate can't install Tailscale here. Get it from tailscale.com/download/linux."
+    found=$(detect /etc/os-release) || fail 22 "Tailgate doesn't recognise this version of Linux. Get Tailscale from tailscale.com/download/linux."
+    os=${found% *}; code=${found#* }
+    log "system: $os $code"
+
+    step "Adding Tailscale's software source…"
+    if [ ! -s "$KEYRING" ]; then
+        [ -s "$SHIPPED_KEY" ] || fail 23 "Tailgate's copy of Tailscale's signing key is missing. Reinstall Tailgate, then try again."
+        install -D -m 644 "$SHIPPED_KEY" "$KEYRING"
+    fi
+    write_list() {
+        printf '# Tailscale packages for %s %s (added by Tailgate, same as tailscale.com/install.sh)\ndeb [signed-by=%s] https://pkgs.tailscale.com/stable/%s %s main\n' \
+            "$1" "$2" "$KEYRING" "$1" "$2" > "$LIST"
+        chmod 644 "$LIST"
+    }
+    # Refreshes only Tailscale's source, so a broken PPA elsewhere can't stop this.
+    update_tailscale() {
+        apt_run apt-get update -o Dir::Etc::sourcelist="$LIST" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
+    }
+    write_list "$os" "$code"
+    step "Downloading Tailscale…"
+    update_tailscale
+    if offline; then
+        fail 20 "Couldn't reach Tailscale's download server. Check that this computer is online, then try again."
+    fi
+    # A release newer than Tailscale's list: its packages are the same for every
+    # release, so use the newest base Tailgate knows.
+    if grep -qE "does not have a Release file|404 +Not Found" "$OUT"; then
+        case $os in ubuntu) fallback=noble ;; *) fallback=bookworm ;; esac
+        if [ "$code" != "$fallback" ]; then
+            log "no Tailscale list for $os $code; using $os $fallback"
+            write_list "$os" "$fallback"
+            update_tailscale
+            offline && fail 20 "Couldn't reach Tailscale's download server. Check that this computer is online, then try again."
+        fi
+        grep -qE "does not have a Release file|404 +Not Found" "$OUT" && \
+            fail 22 "Tailscale doesn't publish a version for this Linux. Get it from tailscale.com/download/linux."
+    fi
+
+    step "Installing Tailscale…"
+    apt_run apt-get install -y -q tailscale tailscale-archive-keyring
+    rc=$?
+    if [ $rc -ne 0 ] && grep -qE '404 +Not Found|Unable to fetch some archives|--fix-missing' "$OUT"; then
+        # The rest of the system's package lists were stale; refresh everything once.
+        step "Refreshing the system's package lists…"
+        apt_run apt-get update
+        step "Installing Tailscale…"
+        apt_run apt-get install -y -q tailscale tailscale-archive-keyring
+        rc=$?
+    fi
+    if [ $rc -ne 0 ]; then
+        offline && fail 20 "Couldn't reach Tailscale's download server. Check that this computer is online, then try again."
+        fail 23 "Installing Tailscale failed: $(grep '^E:' "$OUT" | tail -n1 | cut -c4-200)"
+    fi
+    command -v tailscale >/dev/null 2>&1 || fail 23 "apt finished, but the tailscale command isn't there."
+    log "installed: $(dpkg-query -W -f='${Version}' tailscale 2>/dev/null)"
+fi
+
+step "Starting Tailscale…"
+if [ -d /run/systemd/system ]; then
+    systemctl enable --now tailscaled >> "$LOG" 2>&1 || log "systemctl enable --now tailscaled failed"
+else
+    log "no systemd here; not starting tailscaled"
+fi
+up=
+for _ in $(seq 1 30); do
+    if tailscale debug prefs > /dev/null 2>&1; then up=1; break; fi
+    sleep 1
+done
+[ -n "$up" ] || fail 24 "Tailscale is installed, but its background service didn't start. Restart the computer, then open Tailgate again."
+
+if [ -n "$user" ]; then
+    step "Letting $user control Tailscale…"
+    tailscale set --operator="$user" >> "$LOG" 2>&1 || \
+        fail 25 "Tailscale is running, but Tailgate couldn't give $user control of it."
+    log "operator: $user"
+fi
+step "Done."
+exit 0

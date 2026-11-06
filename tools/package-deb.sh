@@ -24,6 +24,14 @@ chmod 644 "$ROOT/usr/share/applications/tailgate.desktop"
 for s in 48 64 128 256 512; do
     install -Dm644 "assets/icons/tailgate-$s.png" "$ROOT/usr/share/icons/hicolor/${s}x${s}/apps/tailgate.png"
 done
+# One-click Tailscale setup: the root helper, its polkit prompt, and Tailscale's apt
+# signing key (checked here, so a wrong key can't ship).
+TS_FPR=2596A99EAAB33821893C0A79458CA832957F5868
+got=$(gpg --batch --show-keys --with-colons assets/linux/tailscale-archive-keyring.gpg 2>/dev/null | awk -F: '/^fpr/{print $10; exit}')
+[ "$got" = "$TS_FPR" ] || { echo "Tailscale keyring fingerprint is '$got', expected $TS_FPR" >&2; exit 1; }
+install -Dm755 assets/linux/install-tailscale "$ROOT/usr/lib/tailgate/install-tailscale"
+install -Dm644 assets/linux/tailscale-archive-keyring.gpg "$ROOT/usr/share/tailgate/tailscale-archive-keyring.gpg"
+install -Dm644 assets/linux/dev.centerpointlabs.tailgate.policy "$ROOT/usr/share/polkit-1/actions/dev.centerpointlabs.tailgate.policy"
 install -Dm644 assets/tailgate.metainfo.xml "$ROOT/usr/share/metainfo/dev.centerpointlabs.tailgate.metainfo.xml"
 
 DOC="$ROOT/usr/share/doc/tailgate"
@@ -52,7 +60,8 @@ mkdir -p "$STAGE/debian"
 printf 'Source: tailgate\n\nPackage: tailgate\nArchitecture: amd64\n' > "$STAGE/debian/control"
 linked=$(cd "$STAGE" && dpkg-shlibdeps -O -e root/usr/bin/tailgate 2>/dev/null | sed -n 's/^shlibs:Depends=//p')
 test -n "$linked" || { echo "dpkg-shlibdeps found nothing" >&2; exit 1; }
-runtime="libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6, libxrandr2, libxrender1, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-egl1, libegl1, libgl1"
+# pkexec runs the one-click Tailscale setup; Ubuntu 24.04 split it out of policykit-1.
+runtime="pkexec | policykit-1, ca-certificates, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6, libxrandr2, libxrender1, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-egl1, libegl1, libgl1"
 
 mkdir -p "$ROOT/DEBIAN"
 cat > "$ROOT/DEBIAN/control" <<EOF
@@ -62,7 +71,7 @@ Architecture: amd64
 Maintainer: Center Point Labs by nicksosa.tech LLC <nick@centerpointlabs.dev>
 Installed-Size: $(du -sk --exclude=DEBIAN "$ROOT" | cut -f1)
 Depends: $linked, $runtime
-Recommends: pkexec | policykit-1, curl, xdg-utils
+Recommends: curl, xdg-utils
 Suggests: tailscale
 Section: net
 Priority: optional
@@ -72,9 +81,11 @@ Description: Desktop app for Tailscale and its Mullvad exit nodes
  and off, allows LAN access, lists your devices and what this machine
  serves, and checks what sites see, without the command line.
  .
- Tailscale itself isn't in the Ubuntu archive, so it isn't pulled in
- automatically. Install it from tailscale.com; Tailgate shows the steps on
- first launch. Not affiliated with Tailscale Inc. or Mullvad VPN AB.
+ Tailscale itself isn't in the Ubuntu archive. On first launch Tailgate
+ offers an Install Tailscale button: one password, and it adds
+ Tailscale's official apt source (pkgs.tailscale.com, signing key
+ included) and installs and starts Tailscale. No Terminal needed.
+ Not affiliated with Tailscale Inc. or Mullvad VPN AB.
 EOF
 # Tells the desktop to pick up the new menu entry and icon right away.
 cat > "$ROOT/DEBIAN/postinst" <<'EOF'

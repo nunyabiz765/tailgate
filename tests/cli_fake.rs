@@ -316,3 +316,120 @@ fn no_elevation_outside_linux() {
     assert_eq!(client.mutate(&Action::Up, true), Err(CliError::ElevationUnavailable));
     assert!(fake.calls().is_empty());
 }
+
+/// A wrapper for tests/fake-install-tailscale that "installs" the fake CLI at
+/// `target`, the binary `client` was pointed at before it existed.
+#[cfg(unix)]
+fn fake_installer(fake: &Fake, mode: &str) -> (PathBuf, Client) {
+    let target = fake.dir.join("installed-tailscale");
+    let helper = fake.dir.join(format!("install-{mode}"));
+    write_script(
+        &helper,
+        &format!(
+            "FAKE_INSTALL_MODE={mode} FAKE_INSTALL_TARGET='{target}' FAKE_TS_LOG='{log}' FAKE_TS_STATE='{state}' FAKE_TS_MODE=login \
+             exec '{root}/tests/fake-install-tailscale' \"$@\"",
+            target = target.display(),
+            log = fake.dir.join("log").display(),
+            state = fake.dir.join("state").display(),
+            root = env!("CARGO_MANIFEST_DIR"),
+        ),
+    );
+    let mut client = fake.client.clone();
+    client.bin = target;
+    (helper, client)
+}
+
+#[cfg(unix)]
+#[test]
+fn one_click_install_reports_each_step_and_makes_the_caller_operator() {
+    let fake = Fake::new("login");
+    let (helper, client) = fake_installer(&fake, "ok");
+    assert!(matches!(client.read(Query::Status), Err(CliError::Missing(_))));
+    let mut steps = Vec::new();
+    client.install_tailscale(&helper, &mut |s| steps.push(s.to_string())).unwrap();
+    assert_eq!(fake.pkexec_log().trim(), helper.display().to_string(), "helper runs through pkexec with no arguments");
+    assert_eq!(steps.first().map(String::as_str), Some("Adding Tailscale's software source…"));
+    assert_eq!(steps.last().map(String::as_str), Some("Done."));
+    assert!(steps.iter().any(|s| s.starts_with("Letting ")));
+    let user = tailgate::cli::current_user().unwrap();
+    let prefs = status::parse_prefs(&client.read(Query::Prefs).unwrap()).unwrap();
+    assert_eq!(prefs.operator.as_deref(), Some(user.as_str()));
+}
+
+#[cfg(unix)]
+#[test]
+fn one_click_install_failures_come_back_in_plain_words() {
+    let fake = Fake::new("login");
+    for (mode, want) in [
+        ("offline", "Check that this computer is online"),
+        ("busy", "Software Updater"),
+        ("broken", "Installing Tailscale didn't finish. E: something odd"),
+    ] {
+        let (helper, client) = fake_installer(&fake, mode);
+        match client.install_tailscale(&helper, &mut |_| {}) {
+            Err(CliError::Failed(msg)) => {
+                assert!(msg.contains(want), "{mode}: {msg}");
+                assert!(msg.ends_with("(Details: /var/log/tailgate-install.log)"), "{msg}");
+            }
+            other => panic!("{mode}: {other:?}"),
+        }
+        assert!(matches!(client.read(Query::Status), Err(CliError::Missing(_))));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn one_click_install_password_cancelled_and_read_only() {
+    let fake = Fake::new("login");
+    let (helper, mut client) = fake_installer(&fake, "ok");
+    let declined = fake.dir.join("pkexec-dismissed");
+    write_script(
+        &declined,
+        &format!(
+            "FAKE_PKEXEC_MODE=dismissed FAKE_PKEXEC_LOG='{}' exec '{}/tests/fake-pkexec' \"$@\"",
+            fake.dir.join("pkexec.log").display(),
+            env!("CARGO_MANIFEST_DIR"),
+        ),
+    );
+    let real_pkexec = std::mem::replace(&mut client.pkexec, declined);
+    assert_eq!(client.install_tailscale(&helper, &mut |_| {}), Err(CliError::AuthDeclined));
+    client.pkexec = real_pkexec;
+    client.read_only = true;
+    assert!(matches!(client.install_tailscale(&helper, &mut |_| {}), Err(CliError::ReadOnly(_))));
+    client.read_only = false;
+    client.custom_pkexec = false;
+    assert_eq!(client.install_tailscale(&helper, &mut |_| {}), Err(CliError::ElevationRefused));
+    assert!(matches!(client.read(Query::Status), Err(CliError::Missing(_))));
+}
+
+/// The real helper's system detection, and its refusal to take arguments or run
+/// unprivileged. (Installing for real is tested in CI's Ubuntu containers.)
+#[cfg(target_os = "linux")]
+#[test]
+fn install_helper_detects_ubuntu_bases_and_refuses_misuse() {
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/linux/install-tailscale");
+    let dir = std::env::temp_dir().join(format!("tailgate-osrel-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let cases = [
+        ("zorin17", "NAME=\"Zorin OS\"\nID=zorin\nID_LIKE=\"ubuntu debian\"\nVERSION_CODENAME=jammy\nUBUNTU_CODENAME=jammy\n", "ubuntu jammy"),
+        ("zorin18", "NAME=\"Zorin OS\"\nID=zorin\nID_LIKE=\"ubuntu debian\"\nVERSION_CODENAME=noble\nUBUNTU_CODENAME=noble\n", "ubuntu noble"),
+        ("mint22", "NAME=\"Linux Mint\"\nID=linuxmint\nID_LIKE=\"ubuntu debian\"\nVERSION_CODENAME=wilma\nUBUNTU_CODENAME=noble\n", "ubuntu noble"),
+        ("ubuntu", "NAME=\"Ubuntu\"\nID=ubuntu\nID_LIKE=debian\nVERSION_CODENAME=noble\nUBUNTU_CODENAME=noble\n", "ubuntu noble"),
+        ("debian12", "NAME=\"Debian GNU/Linux\"\nID=debian\nVERSION_CODENAME=bookworm\n", "debian bookworm"),
+        ("fedora", "NAME=\"Fedora Linux\"\nID=fedora\nVERSION_ID=41\n", "unsupported"),
+    ];
+    for (name, text, want) in cases {
+        let file = dir.join(name);
+        fs::write(&file, text).unwrap();
+        let out = std::process::Command::new(&helper).arg("--detect").arg(&file).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), want, "{name}");
+        assert_eq!(out.status.code(), Some(if want == "unsupported" { 22 } else { 0 }), "{name}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+    let out = std::process::Command::new(&helper).arg("--operator=evil").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    if unsafe { libc::geteuid() } != 0 {
+        let out = std::process::Command::new(&helper).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "must refuse to run unprivileged");
+    }
+}

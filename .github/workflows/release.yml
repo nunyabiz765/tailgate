@@ -37,7 +37,7 @@ jobs:
         run: |
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends build-essential pkg-config curl ca-certificates git \
-            python3 libfontconfig1-dev libfreetype6-dev libxkbcommon-dev xvfb xauth \
+            python3 gpg libfontconfig1-dev libfreetype6-dev libxkbcommon-dev xvfb xauth \
             libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6 libxkbcommon-x11-0
       - uses: actions/checkout@v7
       - name: Rust
@@ -57,6 +57,13 @@ jobs:
           export TAILGATE_CONFIG_DIR=$(mktemp -d) SLINT_BACKEND=winit-software
           xvfb-run -a -s "-screen 0 1280x900x24" sh -c "$B & P=\$!; sleep 10; kill -0 \$P && kill \$P"
           grep -q '"status", "--json"' fake.log
+      - name: First-run flow against fakes (Install button, progress, errors; screenshots)
+        run: |
+          apt-get install -y -qq --no-install-recommends imagemagick libxtst6
+          TAILGATE_EXE=$PWD/target/release/tailgate tools/drive-install.sh shots
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with: { name: shots-linux-fake-install, path: shots/*, if-no-files-found: warn }
       - run: tools/package-linux.sh target/release/tailgate dist
       # Same binary as the tarball, as a .deb for Ubuntu and the distros built on it.
       - run: tools/package-deb.sh target/release/tailgate dist
@@ -64,7 +71,8 @@ jobs:
         with: { name: dist-linux, path: dist/*, if-no-files-found: error }
 
   # Installs the .deb the way the Software app does (apt resolving Depends) on clean
-  # Ubuntu 22.04 and 24.04, the bases of Zorin OS 17 and 18, then opens the window.
+  # Ubuntu 22.04 and 24.04, the bases of Zorin OS 17 and 18, then opens the window, then
+  # runs the one-click Tailscale install for real (see tools/real-*-test.sh).
   deb-test:
     needs: linux
     runs-on: ubuntu-latest
@@ -101,10 +109,29 @@ jobs:
           export TAILGATE_CONFIG_DIR=$(mktemp -d) SLINT_BACKEND=winit-software
           xvfb-run -a -s "-screen 0 1280x900x24" sh -c "tailgate & P=\$!; sleep 10; kill -0 \$P && kill \$P"
           grep -q '"status", "--json"' fake.log
+      - name: Polkit prompt and install helper are in place
+        env: { DEBIAN_FRONTEND: noninteractive }
+        run: |
+          apt-get install -y -qq --no-install-recommends libxml2-utils
+          P=/usr/share/polkit-1/actions/dev.centerpointlabs.tailgate.policy
+          xmllint --noout "$P"
+          grep -q 'exec.path">/usr/lib/tailgate/install-tailscale<' "$P"
+          test "$(stat -c '%a %U' /usr/lib/tailgate/install-tailscale)" = "755 root"
+          command -v pkexec
+      # Real apt, real pkgs.tailscale.com, os-release rewritten to say Zorin OS.
+      - name: Install helper installs real Tailscale (operator, busy lock, unknown release)
+        run: tools/real-install-test.sh
+      - name: Whole first-run flow in the app with real Tailscale (Xvfb screenshots)
+        run: tools/real-app-install-test.sh shots
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with: { name: "shots-deb-${{ strategy.job-index }}", path: shots/*, if-no-files-found: warn }
       - name: Removes cleanly
         run: |
           apt-get remove -y -qq tailgate
           test ! -e /usr/bin/tailgate
+          test ! -e /usr/lib/tailgate/install-tailscale
+          test ! -e /usr/share/polkit-1/actions/dev.centerpointlabs.tailgate.policy
 
   windows:
     runs-on: windows-latest

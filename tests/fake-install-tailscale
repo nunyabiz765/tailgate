@@ -1,0 +1,26 @@
+#!/bin/sh
+# Stand-in for /usr/lib/tailgate/install-tailscale, run through tests/fake-pkexec.
+#   FAKE_INSTALL_TARGET  where "installing" puts tests/fake-tailscale (a small wrapper)
+#   FAKE_INSTALL_MODE    ok (default) | offline | busy | broken
+#   FAKE_INSTALL_DELAY   seconds per step (default 0)
+# On ok it "installs" the fake CLI, then makes the caller its operator like the real one.
+d=${FAKE_INSTALL_DELAY:-0}
+step() { echo "step: $*"; sleep "$d"; }
+[ $# -eq 0 ] || { echo "usage: no arguments" >&2; exit 2; }
+step "Adding Tailscale's software source…"
+step "Downloading Tailscale…"
+case "${FAKE_INSTALL_MODE:-ok}" in
+  offline) echo "Couldn't reach Tailscale's download server. Check that this computer is online, then try again." >&2; exit 20 ;;
+  busy) echo "Another program is installing updates (often Software Updater). Let it finish, then try again." >&2; exit 21 ;;
+  broken) echo "E: something odd" >&2; exit 1 ;;
+esac
+step "Installing Tailscale…"
+# Keeps the fake's settings, since the app runs it later without them.
+printf '#!/bin/sh\nFAKE_TS_LOG="%s" FAKE_TS_STATE="%s" FAKE_TS_MODE="%s" exec "%s/fake-tailscale" "$@"\n' \
+    "$FAKE_TS_LOG" "${FAKE_TS_STATE:-}" "${FAKE_TS_MODE:-login}" "$(cd "$(dirname "$0")" && pwd)" > "${FAKE_INSTALL_TARGET:?}"
+chmod 755 "$FAKE_INSTALL_TARGET"
+step "Starting Tailscale…"
+user=$(id -un)
+step "Letting $user control Tailscale…"
+"$FAKE_INSTALL_TARGET" set --operator="$user" || exit 25
+echo "step: Done."

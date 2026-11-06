@@ -81,6 +81,8 @@ struct State {
     setup: i32,
     /// "Sign in" was clicked, so open the login page as soon as Tailscale offers one.
     login_requested: bool,
+    /// The one-click Tailscale install is running; `busy` holds its latest step.
+    installing: bool,
 }
 
 struct Controller {
@@ -98,6 +100,8 @@ struct Controller {
     /// instead of briefly showing the old state.
     generation: Arc<AtomicU64>,
     user: String,
+    /// The .deb's root helper for the one-click install, when this system has it.
+    install_helper: Option<PathBuf>,
 }
 
 fn set_model<T: Clone + PartialEq + 'static>(model: &VecModel<T>, rows: Vec<T>) {
@@ -286,6 +290,56 @@ impl Controller {
         if let Some(ui) = self.ui() {
             ui.global::<AppGlobal>().set_ip_state(0);
         }
+    }
+
+    fn on_install_progress(&self, step: String) {
+        let mut state = self.state.borrow_mut();
+        if state.installing {
+            state.busy = Some(step);
+            drop(state);
+            self.render();
+        }
+    }
+
+    fn on_installed(self: &Rc<Self>, result: Result<(), CliError>) {
+        {
+            let mut state = self.state.borrow_mut();
+            state.busy = None;
+            state.installing = false;
+        }
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        match result {
+            Ok(()) => self.notify(1, "Tailscale is installed and running. Next: sign in."),
+            Err(CliError::AuthDeclined) => self.notify(2, "Cancelled, so nothing was installed. Click the button again when you're ready."),
+            Err(e) => self.notify(2, e.to_string()),
+        }
+        self.render();
+        self.wake_poll(true);
+    }
+
+    /// The "Install Tailscale" / "Start Tailscale" button: one password prompt for
+    /// installing, starting, and making this user the operator.
+    fn install(self: &Rc<Self>) {
+        let Some(helper) = self.install_helper.clone() else { return };
+        {
+            let mut state = self.state.borrow_mut();
+            if state.busy.is_some() {
+                return;
+            }
+            state.installing = true;
+            state.busy = Some("Type your computer password in the box that opens…".into());
+        }
+        self.notify(0, "");
+        self.render();
+        let client = self.client.clone();
+        thread::spawn(move || {
+            let mut progress = |step: &str| {
+                let step = step.to_string();
+                post(move |c| c.on_install_progress(step));
+            };
+            let result = client.install_tailscale(&helper, &mut progress);
+            post(move |c| c.on_installed(result));
+        });
     }
 
     // ---- starting a change ----
@@ -492,6 +546,7 @@ impl Controller {
         app.set_setup_step(state.setup);
         app.set_setup_operator(!self.user.is_empty() && prefs.and_then(|p| p.operator.as_deref()) == Some(self.user.as_str()));
         app.set_setup_user(self.user.clone().into());
+        app.set_setup_installing(state.installing);
         if state.setup == 1 || state.setup == 2 {
             app.set_title(if state.setup == 1 { "Tailscale isn't installed" } else { "Tailscale isn't running" }.into());
             app.set_pill("Setup".into());
@@ -697,6 +752,7 @@ pub fn run(read_only: bool) -> Result<(), slint::PlatformError> {
         notice_timer: slint::Timer::default(),
         poll,
         generation,
+        install_helper: cli::install_helper(),
     });
     CONTROLLER.with(|c| *c.borrow_mut() = Some(controller.clone()));
 
@@ -704,6 +760,14 @@ pub fn run(read_only: bool) -> Result<(), slint::PlatformError> {
     app.set_banner(banner.into());
     app.set_banner_action(banner_action.into());
     app.set_setup_install(setup_install.into());
+    app.set_setup_can_install(controller.install_helper.is_some() && !read_only);
+    app.on_install_tailscale(|| {
+        with(|c| {
+            if !c.modal_open() {
+                c.install();
+            }
+        })
+    });
     app.on_banner_clicked(|| with(|c| c.open(cli::DOWNLOAD_URL)));
     app.set_version(env!("CARGO_PKG_VERSION").into());
     let user = if controller.user.is_empty() { "your user" } else { controller.user.as_str() };

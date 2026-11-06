@@ -222,6 +222,30 @@ impl Client {
         }
     }
 
+    /// Runs the install helper as root. `progress` gets each "step: ..." line.
+    pub fn install_tailscale(&self, helper: &Path, progress: &mut dyn FnMut(&str)) -> Result<(), CliError> {
+        if self.read_only {
+            return Err(CliError::ReadOnly(helper.display().to_string()));
+        }
+        if !ELEVATION && !self.custom_pkexec {
+            return Err(CliError::ElevationUnavailable);
+        }
+        if self.custom_bin && !self.custom_pkexec {
+            return Err(CliError::ElevationRefused);
+        }
+        let mut on_line = |line: &str| {
+            if let Some(step) = line.strip_prefix("step: ") {
+                progress(step.trim());
+            }
+        };
+        let out = run_watching(&self.pkexec, &[helper.to_string_lossy().into_owned()], INSTALL_TIMEOUT, &mut on_line)?;
+        match out.code {
+            Some(0) => Ok(()),
+            Some(126) | Some(127) => Err(CliError::AuthDeclined),
+            code => Err(CliError::Failed(install_failure(code, &out.stderr))),
+        }
+    }
+
     fn elevated(&self, args: &[String]) -> Result<String, CliError> {
         if !ELEVATION && !self.custom_pkexec {
             return Err(CliError::ElevationUnavailable);
@@ -246,6 +270,45 @@ impl Client {
 /// pkexec exists only on Linux. Elsewhere an "access denied" gets an explanation
 /// instead of a password prompt.
 pub const ELEVATION: bool = cfg!(target_os = "linux");
+
+/// The .deb's root helper that installs, starts and hands over Tailscale
+/// (assets/linux/install-tailscale). The tarball doesn't have it.
+pub const INSTALL_HELPER: &str = "/usr/lib/tailgate/install-tailscale";
+/// A slow line and apt waiting out Software Updater both fit in this.
+pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// The install helper to offer, if this system has one. TAILGATE_INSTALL_HELPER
+/// points tests at a stand-in.
+pub fn install_helper() -> Option<PathBuf> {
+    if !ELEVATION {
+        return None;
+    }
+    let path = std::env::var_os("TAILGATE_INSTALL_HELPER")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(INSTALL_HELPER));
+    path.is_file().then_some(path)
+}
+
+/// Plain words for the helper's exit codes. The helper's own last line, when it
+/// wrote one, is already plain and more specific.
+pub fn install_failure(code: Option<i32>, stderr: &str) -> String {
+    let own = stderr.lines().rev().map(str::trim).find(|l| !l.is_empty());
+    let generic = match code {
+        Some(20) => "Couldn't reach Tailscale's download server. Check that this computer is online, then try again.",
+        Some(21) => "Another program is installing updates (often Software Updater). Let it finish, then try again.",
+        Some(22) => "Tailgate can't install Tailscale on this version of Linux. Get it from tailscale.com/download/linux.",
+        Some(24) => "Tailscale is installed, but its background service didn't start. Restart the computer, then open Tailgate again.",
+        Some(25) => "Tailscale is running, but Tailgate couldn't get control of it. Click the button again.",
+        _ => "Installing Tailscale didn't finish.",
+    };
+    let text = match (code, own) {
+        (Some(20..=25), Some(line)) => line.to_string(),
+        (_, Some(line)) => format!("{generic} {line}"),
+        (_, None) => generic.to_string(),
+    };
+    format!("{text} (Details: /var/log/tailgate-install.log)")
+}
 
 /// The kind of Tailscale install found, which decides what Tailgate can promise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,6 +468,16 @@ pub struct Output {
 
 /// Runs a program with a hard deadline. Called from worker threads only.
 pub fn run(program: &Path, args: &[String], timeout: Duration) -> Result<Output, CliError> {
+    run_watching(program, args, timeout, &mut |_| {})
+}
+
+/// `run`, calling `on_line` with each complete stdout line as it arrives.
+pub fn run_watching(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<Output, CliError> {
     let mut command = Command::new(program);
     command.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
@@ -426,8 +499,18 @@ pub fn run(program: &Path, args: &[String], timeout: Duration) -> Result<Output,
     let stdout = collect(child.stdout.take());
     let stderr = collect(child.stderr.take());
     let started = Instant::now();
+    let mut seen = 0;
+    let mut watch = |done: bool| {
+        let text = stdout.text();
+        let end = if done { text.len() } else { text.rfind('\n').map_or(0, |i| i + 1) };
+        if end > seen {
+            text[seen..end].lines().for_each(&mut *on_line);
+            seen = end;
+        }
+    };
 
     let status = loop {
+        watch(false);
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= timeout => {
@@ -445,6 +528,7 @@ pub fn run(program: &Path, args: &[String], timeout: Duration) -> Result<Output,
     while !(stdout.is_done() && stderr.is_done()) && grace.elapsed() < Duration::from_millis(500) {
         thread::sleep(Duration::from_millis(5));
     }
+    watch(true);
 
     Ok(Output {
         success: status.success(),
@@ -564,6 +648,15 @@ mod tests {
 
     fn set_exit(ip: &str) -> Action {
         Action::SetExitNode { ip: ip.into(), label: "Dallas".into() }
+    }
+
+    #[test]
+    fn install_failures_read_plainly() {
+        let log = "(Details: /var/log/tailgate-install.log)";
+        assert_eq!(install_failure(Some(21), "Wait for it.\n"), format!("Wait for it. {log}"));
+        assert!(install_failure(Some(20), "").starts_with("Couldn't reach Tailscale's download server."));
+        assert_eq!(install_failure(Some(1), "E: boom\n\n"), format!("Installing Tailscale didn't finish. E: boom {log}"));
+        assert_eq!(install_failure(None, ""), format!("Installing Tailscale didn't finish. {log}"));
     }
 
     #[test]

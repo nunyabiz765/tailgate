@@ -15,8 +15,9 @@
       machine serves, and check what sites see, without the command line.
     </p>
     <p>
-      Tailgate needs Tailscale installed and signed in. If it isn't, Tailgate shows
-      the steps. Not affiliated with or endorsed by Tailscale Inc. or Mullvad VPN AB.
+      Tailgate needs Tailscale installed and signed in. If it isn't, Tailgate's
+      first page installs it with one click and one password on Ubuntu, Zorin OS,
+      Linux Mint and Pop!_OS, then opens the sign-in page. Not affiliated with or endorsed by Tailscale Inc. or Mullvad VPN AB.
     </p>
   </description>
   <launchable type="desktop-id">tailgate.desktop</launchable>

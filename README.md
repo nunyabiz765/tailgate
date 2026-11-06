@@ -64,7 +64,11 @@ Apps opened from Finder don't get your shell's `PATH`, so Tailgate also looks in
 2. Double-click it. It opens in your Software app (Software Manager on Mint, Eddy on Pop!_OS); click **Install** and type your password. Or in a terminal: `sudo apt install ./tailgate_0.2.2_amd64.deb`
 3. Open **Tailgate** from the app menu.
 
-Built for Ubuntu 22.04 and 24.04 and the distros based on them, and Debian 12. Each release installs it with apt on clean Ubuntu 22.04 and 24.04 before publishing; Zorin, Mint and Pop!_OS themselves haven't been tried yet. It doesn't install Tailscale, which isn't in the Ubuntu archive. If Tailscale is missing or not signed in, Tailgate opens on a short setup page with the commands and Copy buttons: Tailscale's official installer (`curl -fsSL https://tailscale.com/install.sh | sh`), signing in, and the one-time operator grant. Uninstall with `sudo apt remove tailgate`.
+4. If Tailscale isn't installed yet, Tailgate opens on a setup page. Click **Install Tailscale** and type your password once, then click **Sign in to Tailscale** and sign in in the browser. No Terminal needed.
+
+**Install Tailscale** runs `/usr/lib/tailgate/install-tailscale` as root through pkexec (the password box names Tailgate). It does what Tailscale's own `install.sh` does: adds Tailscale's apt source (`pkgs.tailscale.com/stable/ubuntu/<release>`, signed by Tailscale's key `2596 A99E AAB3 3821 893C 0A79 458C A832 957F 5868`, which ships in the .deb rather than being downloaded) and installs the `tailscale` package, so updates come with normal system updates. Then it starts `tailscaled` and makes your account Tailscale's operator (below). It waits if Software Updater is busy, and says so plainly if the computer is offline. A log is kept in `/var/log/tailgate-install.log`. If Tailscale is installed but stopped, the same button reads **Start Tailscale**.
+
+Built for Ubuntu 22.04 and 24.04 and the distros based on them, and Debian 12. Each release installs it with apt on clean Ubuntu 22.04 and 24.04 before publishing, and there runs the one-click install for real against pkgs.tailscale.com with the system set up to look like Zorin OS. Zorin, Mint and Pop!_OS themselves haven't been tried yet. Uninstall with `sudo apt remove tailgate` (Tailscale stays; `sudo apt remove tailscale` removes it).
 
 ### Any other distro
 
@@ -108,7 +112,7 @@ This shows live status and refuses every change before anything is run.
 
 **Windows and macOS:** Tailgate runs Tailscale's command line as you and never asks for a password or admin rights. If Tailscale refuses a change (on Windows it only takes changes from the account that's signed in to the Tailscale app), Tailgate shows what Tailscale said and nothing changes.
 
-**Linux:** without an operator set, Tailscale refuses changes from a normal user ("Access denied"). The first time that happens, Tailgate offers two choices:
+**Linux:** the one-click Tailscale install on the setup page also makes your account the operator, with the same password. Otherwise, without an operator set, Tailscale refuses changes from a normal user ("Access denied"). The first time that happens, Tailgate offers two choices:
 
 - **Let Tailgate control Tailscale** runs `pkexec tailscale set --operator=<your username>` once, with your password, then retries what you asked for. The username comes from the system's password database for the account running the app. From then on your account can change Tailscale settings without a password, from Tailgate or from the plain `tailscale` command.
 - **Just this once** runs only that one change through pkexec. Nothing is remembered.
@@ -184,7 +188,7 @@ grep -vE 'status|prefs' /tmp/ts.log
 
 `FAKE_TS_MODE` can be `ok`, `denied`, `denied-until-operator`, `slow`, `gone`, `malformed`, `fail`, `login` or `stopped`. While a test binary is configured the window says so in a banner, and Tailgate refuses to run it through the real pkexec.
 
-Other test overrides: `TAILGATE_OPEN_BIN`, `TAILGATE_IPCHECK_URL`, `TAILGATE_READ_TIMEOUT_MS`.
+Other test overrides: `TAILGATE_OPEN_BIN`, `TAILGATE_IPCHECK_URL`, `TAILGATE_READ_TIMEOUT_MS`, and `TAILGATE_INSTALL_HELPER` (with `tests/fake-install-tailscale`; `tools/drive-install.sh` clicks through the setup page that way).
 
 On Windows the tests wrap the fake in a `.cmd` that runs it with `python`. CI (`.github/workflows/release.yml`) runs `cargo test` on Linux, Windows and macOS, opens the window against the fake on all three, and builds the release downloads on every `v*` tag.
 
